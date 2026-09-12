@@ -11,7 +11,7 @@ pub struct Agent<P: ModelProvider> {
     tools: Arc<ToolRegistry>,
 }
 
-impl<P: ModelProvider> Agent<P> {
+impl<P: ModelProvider + 'static> Agent<P> {
     pub fn new(provider: Arc<P>, tools: Arc<ToolRegistry>) -> Self { Self { provider, tools } }
 
     pub async fn execute(&self, prompt: String, working_dir: Option<std::path::PathBuf>, interrupt: InterruptSignal) -> Result<mpsc::UnboundedReceiver<AgentEvent>> {
@@ -63,18 +63,35 @@ async fn run_loop<P: ModelProvider>(
             break;
         }
 
-        for call in turn.tool_calls {
+        let tool_calls = turn.tool_calls;
+        for call in &tool_calls {
             if interrupt.is_set() { return Err(LucyError::Cancelled.into()); }
             let _ = tx.send(AgentEvent::ToolStarted { id: call.id.clone(), name: call.name.clone() });
-            let ctx = ToolContext {
-                session_id: session_id.clone(),
-                tool_call_id: call.id.clone(),
-                working_dir: working_dir.clone(),
-                execution_mode: ExecutionMode::Agent,
-                events: tx.clone(),
-                interrupt: interrupt.clone(),
-            };
-            let result = tools.execute(&call.name, call.input, ctx).await;
+        }
+
+        // Independent tool calls from one model turn can run concurrently. Keep
+        // results in model order so the next request remains deterministic.
+        let results = futures::future::join_all(tool_calls.into_iter().map(|call| {
+            let tools = tools.clone();
+            let interrupt = interrupt.clone();
+            let tx = tx.clone();
+            let session_id = session_id.clone();
+            let working_dir = working_dir.clone();
+            async move {
+                let ctx = ToolContext {
+                    session_id,
+                    tool_call_id: call.id.clone(),
+                    working_dir,
+                    execution_mode: ExecutionMode::Agent,
+                    events: tx.clone(),
+                    interrupt: interrupt.clone(),
+                };
+                let result = tools.execute(&call.name, call.input.clone(), ctx).await;
+                (call, result)
+            }
+        })).await;
+
+        for (call, result) in results {
             let (output, is_error) = match result {
                 Ok(output) => (output, false),
                 Err(err) => (serde_json::json!({"error": err.to_string()}), true),

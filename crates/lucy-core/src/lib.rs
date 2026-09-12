@@ -15,6 +15,14 @@ pub type InterruptQueue = Arc<std::sync::Mutex<Vec<InterruptMessage>>>;
 
 #[derive(Clone)]
 pub struct InterruptSignal { flag: Arc<AtomicBool>, epoch: Arc<AtomicU64>, notify: Arc<Notify> }
+impl std::fmt::Debug for InterruptSignal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InterruptSignal")
+            .field("flag", &self.flag.load(Ordering::SeqCst))
+            .field("epoch", &self.epoch.load(Ordering::SeqCst))
+            .finish()
+    }
+}
 impl InterruptSignal {
     pub fn new() -> Self { Self { flag: Arc::new(AtomicBool::new(false)), epoch: Arc::new(AtomicU64::new(0)), notify: Arc::new(Notify::new()) } }
     pub fn fire(&self) { self.epoch.fetch_add(1, Ordering::SeqCst); self.flag.store(true, Ordering::SeqCst); self.notify.notify_waiters(); }
