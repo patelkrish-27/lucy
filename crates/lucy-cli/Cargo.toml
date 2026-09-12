@@ -1,0 +1,20 @@
+[package]
+name = "lucy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lucy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+lucy-agent = { path = "../lucy-agent" }
+lucy-core = { path = "../lucy-core" }
+lucy-tools = { path = "../lucy-tools" }
+lucy-tui = { path = "../lucy-tui" }
