@@ -15,9 +15,25 @@ pub fn run(mut rx: Option<mpsc::UnboundedReceiver<AgentEvent>>) -> anyhow::Resul
     let mut terminal = Terminal::new(backend)?;
     let mut app = App::default();
     loop {
-        terminal.draw(|f| { let area = f.area(); let text = format!("Lucy\n\n{}\n\n> {}\n\n[Esc] quit", app.status, app.input); f.render_widget(Paragraph::new(text).block(Block::default().title("Lucy — Your AI Computer Buddy").borders(Borders::ALL)), area); })?;
-        if let Some(receiver) = rx.as_mut() { while let Ok(event) = receiver.try_recv() { match event { AgentEvent::TextDelta { text } => app.transcript.push(text), AgentEvent::Status { message } => app.status = message, AgentEvent::Error { message } => app.status = message, AgentEvent::Done => app.running = false, _ => {} } } }
-        if event::poll(std::time::Duration::from_millis(50))? { if let Event::Key(key) = event::read()? { match key.code { KeyCode::Esc => break, KeyCode::Char(c) => app.input.push(c), KeyCode::Backspace => { app.input.pop(); }, KeyCode::Enter => { app.status = format!("Queued: {}", app.input); app.input.clear(); app.running=true; }, _ => {} } } }
+        terminal.draw(|f| {
+            let area = f.area();
+            let text = format!("Lucy\n\n{}\n\n> {}\n\n[Esc] quit", app.status, app.input);
+            f.render_widget(Paragraph::new(text).block(Block::default().title("Lucy — Your AI Computer Buddy").borders(Borders::ALL)), area);
+        })?;
+        if let Some(receiver) = rx.as_mut() {
+            while let Ok(event) = receiver.try_recv() {
+                match event {
+                    AgentEvent::TextDelta { text } => app.transcript.push(text),
+                    AgentEvent::Status { message } => app.status = message,
+                    AgentEvent::Error { message } => app.status = message,
+                    AgentEvent::Done => app.running = false,
+                    _ => {}
+                }
+            }
+        }
+        if event::poll(std::time::Duration::from_millis(50))? {
+            if let Event::Key(key) = event::read()? { match key.code { KeyCode::Esc => break, KeyCode::Char(c) => app.input.push(c), KeyCode::Backspace => { app.input.pop(); }, KeyCode::Enter => { app.status = format!("Queued: {}", app.input); app.input.clear(); app.running=true; }, _ => {} } }
+        }
     }
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
