@@ -29,3 +29,7 @@ cargo run -p lucy
 ## License
 
 MIT. See `THIRD_PARTY.md` for attribution and migration notes.
+
+## Runtime status
+
+Phase 1 now includes a structured model-turn API, a bounded tool execution loop, cancellation-aware shell execution, output limits, timeouts, and deterministic shell-risk gating. The remaining provider and MCP work is intentionally separated from the agent core.
