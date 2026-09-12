@@ -21,7 +21,7 @@ async fn main() -> anyhow::Result<()> {
         }
         Some("--help") | Some("-h") => {
             println!(
-                "Lucy\n\nUsage:\n  lucy                         Open the Lucy TUI\n  lucy voice                   Open the voice-enabled TUI\n  lucy transcribe <audio-file> Transcribe an existing audio file\n\nVoice controls:\n  Super+C                      Listen for one spoken command\n  Esc                          Quit\n\nVoice input:\n  Microphone -> speech detection -> WAV chunk -> Groq Whisper -> command shown in TUI\n\nEnvironment:\n  GROQ_API_KEY                 Required for voice transcription\n  LUCY_STT_MODEL               Optional; defaults to whisper-large-v3-turbo\n  LUCY_STT_LANGUAGE            Optional language code, e.g. en\n  LUCY_STT_PROMPT              Optional transcription context"
+                "Lucy\n\nUsage:\n  lucy                         Open the Lucy TUI (keyboard + voice)\n  lucy voice                   Open the voice-enabled TUI\n  lucy transcribe <audio-file> Transcribe an existing audio file\n\nTUI controls:\n  Type + Enter                 Send keyboard prompt\n  Super+C / Ctrl+Space / F2 / F9 / Alt+V / Ctrl+M  Listen for one spoken command\n  Esc                          Quit\n\nVoice input:\n  Microphone -> speech detection -> WAV chunk -> Groq Whisper -> command shown in TUI\n  (Tip: If Super+C is captured by Hyprland, use Ctrl+Space or F2)\n\nEnvironment:\n  GROQ_API_KEY                 Required for voice transcription\n  LUCY_STT_MODEL               Optional; defaults to whisper-large-v3-turbo\n  LUCY_STT_LANGUAGE            Optional language code, e.g. en\n  LUCY_STT_PROMPT              Optional transcription context"
             );
         }
         _ => {

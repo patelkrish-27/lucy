@@ -19,7 +19,7 @@ use ratatui::{
 };
 use tokio::sync::mpsc;
 
-const VOICE_HOTKEY: &str = "Super+C";
+const VOICE_HOTKEY: &str = "Super+C / Ctrl+Space / F2";
 
 pub struct App {
     pub status: String,
@@ -31,7 +31,7 @@ pub struct App {
 impl Default for App {
     fn default() -> Self {
         Self {
-            status: "Ready — press Super+C to speak".into(),
+            status: "Ready — type below or press Super+C / Ctrl+Space / F2 to speak".into(),
             listening: false,
             commands: Vec::new(),
             input: String::new(),
@@ -46,14 +46,29 @@ fn draw(
     terminal.draw(|frame| {
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(3), Constraint::Length(2)])
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(3),
+                Constraint::Length(3),
+                Constraint::Length(1),
+            ])
             .split(frame.area());
 
         let history = if app.commands.is_empty() {
-            vec![ListItem::new(Line::from(Span::styled(
-                "No commands yet. Press Super+C and start speaking.",
-                Style::default().add_modifier(Modifier::DIM),
-            )))]
+            vec![
+                ListItem::new(Line::from(Span::styled(
+                    "No commands yet.",
+                    Style::default().add_modifier(Modifier::DIM),
+                ))),
+                ListItem::new(Line::from(Span::styled(
+                    "• Type your prompt below and press Enter",
+                    Style::default().add_modifier(Modifier::DIM),
+                ))),
+                ListItem::new(Line::from(Span::styled(
+                    "• Or press Super+C / Ctrl+Space / F2 to speak (mic → Groq Whisper)",
+                    Style::default().add_modifier(Modifier::DIM),
+                ))),
+            ]
         } else {
             app.commands
                 .iter()
@@ -80,10 +95,26 @@ fn draw(
             outer[1],
         );
 
+        // Visible keyboard input field
+        let input_text = format!("> {}", app.input);
         frame.render_widget(
-            Paragraph::new(format!("[{}] voice   [Esc] quit", VOICE_HOTKEY))
-                .style(Style::default().add_modifier(Modifier::DIM)),
+            Paragraph::new(input_text)
+                .block(
+                    Block::default()
+                        .title(" Input — type + Enter to send ")
+                        .borders(Borders::ALL),
+                ),
             outer[2],
+        );
+        // Place cursor after the input text
+        let cursor_x = outer[2].x + 2 + app.input.len() as u16;
+        let cursor_y = outer[2].y + 1;
+        frame.set_cursor_position((cursor_x, cursor_y));
+
+        frame.render_widget(
+            Paragraph::new(format!("[{}] voice   [Enter] send   [Esc] quit", VOICE_HOTKEY))
+                .style(Style::default().add_modifier(Modifier::DIM)),
+            outer[3],
         );
     })?;
     Ok(())
@@ -135,17 +166,17 @@ pub async fn run_voice(stt: Option<Arc<GroqStt>>) -> anyhow::Result<()> {
 
             match result {
                 Ok(text) if !text.trim().is_empty() => {
-                    let text = text.trim().to_owned();
-                    app.commands.push(format!("You  ›  {text}"));
-                    app.status = format!("Command received: {text}");
-                }
-                Ok(_) => {
-                    app.status = "I didn't catch anything — press Super+C and try again".into();
-                }
-                Err(error) => {
-                    app.status = format!("Voice error: {error}");
-                }
-            }
+                     let text = text.trim().to_owned();
+                     app.commands.push(format!("You  ›  {text}"));
+                     app.status = format!("Command received: {text}");
+                 }
+                 Ok(_) => {
+                     app.status = "I didn't catch anything — type or press Super+C / Ctrl+Space / F2 and try again".into();
+                 }
+                 Err(error) => {
+                     app.status = format!("Voice error: {error}");
+                 }
+             }
         }
 
         if event::poll(Duration::from_millis(50))? {
@@ -154,10 +185,17 @@ pub async fn run_voice(stt: Option<Arc<GroqStt>>) -> anyhow::Result<()> {
                     continue;
                 }
 
-                let super_c = key.code == KeyCode::Char('c')
-                    && key.modifiers.contains(KeyModifiers::SUPER);
+                // Super+C is unreliable on Hyprland/Foot (compositor consumes Super, foot Kitty protocol may not send SUPER).
+                // Support multiple triggers: Super+C, Ctrl+Space, F2, F9, Alt+V, and plain 'm' with Ctrl.
+                let is_voice_hotkey = (key.code == KeyCode::Char('c')
+                    && key.modifiers.contains(KeyModifiers::SUPER))
+                    || (key.code == KeyCode::Char(' ') && key.modifiers.contains(KeyModifiers::CONTROL))
+                    || key.code == KeyCode::F(2)
+                    || key.code == KeyCode::F(9)
+                    || (key.code == KeyCode::Char('v') && key.modifiers.contains(KeyModifiers::ALT))
+                    || (key.code == KeyCode::Char('m') && key.modifiers.contains(KeyModifiers::CONTROL));
 
-                if super_c && !voice_task_running {
+                if is_voice_hotkey && !voice_task_running {
                     match stt.as_ref() {
                         Some(stt) => {
                             let stt = Arc::clone(stt);
@@ -181,7 +219,13 @@ pub async fn run_voice(stt: Option<Arc<GroqStt>>) -> anyhow::Result<()> {
 
                 match key.code {
                     KeyCode::Esc => break Ok(()),
-                    KeyCode::Char(c) if key.modifiers.is_empty() => app.input.push(c),
+                    KeyCode::Char(c)
+                        if !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER) =>
+                    {
+                        app.input.push(c)
+                    }
                     KeyCode::Backspace => {
                         app.input.pop();
                     }
