@@ -10,12 +10,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
-async-trait.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-lucy-agent = { path = "../lucy-agent" }
-lucy-core = { path = "../lucy-core" }
-lucy-tools = { path = "../lucy-tools" }
+lucy-runtime = { path = "../lucy-runtime" }
 lucy-tui = { path = "../lucy-tui" }
 lucy-stt = { path = "../lucy-stt" }
