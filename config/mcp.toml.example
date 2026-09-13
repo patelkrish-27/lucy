@@ -1,0 +1,18 @@
+# Copy to ~/.config/lucy/mcp.toml
+# Each server is started on demand for a tool call.
+
+# [[servers]]
+# name = "slack"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-slack"]
+#
+# [servers.env]
+# SLACK_BOT_TOKEN = "xoxb-..."
+
+# [[servers]]
+# name = "github"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-github"]
+#
+# [servers.env]
+# GITHUB_PERSONAL_ACCESS_TOKEN = "..."
