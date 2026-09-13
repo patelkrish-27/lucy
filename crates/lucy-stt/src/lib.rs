@@ -121,9 +121,12 @@ fn capture_utterance() -> Result<(Vec<i16>, u32, u16)> {
     let mut seen_samples = 0usize;
     loop {
         std::thread::sleep(POLL);
-        let current = samples.lock().map_err(|_| anyhow!("microphone buffer poisoned"))?.clone();
-        let recent = &current[seen_samples.min(current.len())..];
-        if !recent.is_empty() {
+        let current = {
+            let guard = samples.lock().map_err(|_| anyhow!("microphone buffer poisoned"))?;
+            guard.clone()
+        };
+        if current.len() > seen_samples {
+            let recent = &current[seen_samples..];
             let rms = rms_i16(recent);
             if !speech_started && rms >= START_THRESHOLD && started.elapsed() >= START_WINDOW {
                 speech_started = true;

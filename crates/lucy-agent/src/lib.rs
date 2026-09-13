@@ -4,6 +4,9 @@ use lucy_core::*;
 use lucy_tools::ToolRegistry;
 use tokio::sync::mpsc;
 
+pub mod provider;
+pub use provider::OpenAIProvider;
+
 const MAX_TOOL_TURNS: usize = 64;
 
 pub struct Agent<P: ModelProvider> {
