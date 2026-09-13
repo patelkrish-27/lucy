@@ -11,67 +11,40 @@ pub struct ToolRegistry { tools: HashMap<String, Arc<dyn Tool>> }
 impl ToolRegistry {
     pub fn new() -> Self { Self { tools: HashMap::new() } }
     pub fn register<T: Tool + 'static>(&mut self, tool: T) { self.tools.insert(tool.name().to_string(), Arc::new(tool)); }
+    pub fn register_arc(&mut self, tool: Arc<dyn Tool>) { self.tools.insert(tool.name().to_string(), tool); }
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> { self.tools.get(name).cloned() }
     pub fn definitions(&self) -> Vec<Value> { self.tools.values().map(|t| serde_json::json!({"name":t.name(),"description":t.description(),"input_schema":t.parameters_schema()})).collect() }
-    pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<Value> {
-        if ctx.interrupt.is_set() { return Err(LucyError::Cancelled.into()); }
-        let tool = self.get(name).ok_or_else(|| anyhow!(LucyError::ToolNotFound(name.to_string())))?;
-        tool.execute(input, ctx).await
-    }
+    pub async fn execute(&self, name: &str, input: Value, ctx: ToolContext) -> Result<Value> { if ctx.interrupt.is_set(){return Err(LucyError::Cancelled.into());} let tool=self.get(name).ok_or_else(||anyhow!(LucyError::ToolNotFound(name.to_string())))?; tool.execute(input,ctx).await }
 }
-impl Default for ToolRegistry { fn default() -> Self { Self::new() } }
+impl Default for ToolRegistry { fn default()->Self{Self::new()} }
 
-pub struct ShellTool { pub output_limit: usize, pub timeout: Duration }
-impl Default for ShellTool { fn default() -> Self { Self { output_limit: DEFAULT_OUTPUT_LIMIT, timeout: DEFAULT_TIMEOUT } } }
+fn allowed_command(command:&str)->bool{if std::env::var("LUCY_ALLOW_DANGEROUS").ok().as_deref()==Some("1"){return true;}let c=command.to_ascii_lowercase();let blocked=["rm -rf /","mkfs","dd if=",":(){:|:&};:","shutdown","reboot","poweroff","chmod -r 777 /","chown -r"];!blocked.iter().any(|x|c.contains(x))}
 
+pub struct ShellTool{pub output_limit:usize,pub timeout:Duration}
+impl Default for ShellTool{fn default()->Self{Self{output_limit:DEFAULT_OUTPUT_LIMIT,timeout:DEFAULT_TIMEOUT}}}
 #[async_trait::async_trait]
-impl Tool for ShellTool {
-    fn name(&self) -> &str { "shell" }
-    fn description(&self) -> &str { "Run a shell command in Lucy's working directory." }
-    fn parameters_schema(&self) -> Value {
-        serde_json::json!({
-            "type":"object",
-            "properties":{
-                "command":{"type":"string","description":"Shell command to execute"},
-                "intent":{"type":"string","description":"Why this tool call is needed"}
-            },
-            "required":["command","intent"]
-        })
-    }
-    async fn execute(&self, input: Value, ctx: ToolContext) -> Result<Value> {
-        if ctx.interrupt.is_set() { return Err(LucyError::Cancelled.into()); }
-        let command = input.get("command").and_then(Value::as_str).ok_or_else(|| anyhow!(LucyError::InvalidInput("command is required".into())))?;
-        let working_dir = ctx.working_dir.clone().unwrap_or(std::env::current_dir()?);
-        let mut child = tokio::process::Command::new("sh")
-            .arg("-lc").arg(command).current_dir(&working_dir)
-            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("failed to capture stdout"))?;
-        let stderr = child.stderr.take().ok_or_else(|| anyhow!("failed to capture stderr"))?;
-        let limit = self.output_limit;
-        let out_task = tokio::spawn(async move { read_limited(stdout, limit).await });
-        let err_task = tokio::spawn(async move { read_limited(stderr, limit).await });
-        tokio::select! {
-            status = child.wait() => {
-                let status = status?;
-                let stdout = out_task.await??;
-                let stderr = err_task.await??;
-                Ok(serde_json::json!({"status":status.code(),"success":status.success(),"stdout":stdout,"stderr":stderr,"truncated":false}))
-            }
-            _ = ctx.interrupt.notified() => { let _ = child.kill().await; Err(LucyError::Cancelled.into()) }
-            _ = tokio::time::sleep(self.timeout) => { let _ = child.kill().await; Err(anyhow!("shell tool timed out after {} seconds", self.timeout.as_secs())) }
-        }
-    }
+impl Tool for ShellTool{
+ fn name(&self)->&str{"shell"}
+ fn description(&self)->&str{"Run a shell command in Lucy's working directory. Destructive system-wide commands are blocked unless LUCY_ALLOW_DANGEROUS=1."}
+ fn parameters_schema(&self)->Value{serde_json::json!({"type":"object","properties":{"command":{"type":"string"},"intent":{"type":"string"}},"required":["command","intent"]})}
+ async fn execute(&self,input:Value,ctx:ToolContext)->Result<Value>{let command=input.get("command").and_then(Value::as_str).ok_or_else(||anyhow!(LucyError::InvalidInput("command is required".into())))?;if !allowed_command(command){return Err(anyhow!("command blocked by Lucy safety policy; set LUCY_ALLOW_DANGEROUS=1 only when explicitly requested"));}let working_dir=ctx.working_dir.clone().unwrap_or(std::env::current_dir()?);let mut child=tokio::process::Command::new("sh").arg("-lc").arg(command).current_dir(&working_dir).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn()?;let stdout=child.stdout.take().ok_or_else(||anyhow!("failed to capture stdout"))?;let stderr=child.stderr.take().ok_or_else(||anyhow!("failed to capture stderr"))?;let limit=self.output_limit;let out_task=tokio::spawn(async move{read_limited(stdout,limit).await});let err_task=tokio::spawn(async move{read_limited(stderr,limit).await});tokio::select!{status=child.wait()=>{let status=status?;let stdout=out_task.await??;let stderr=err_task.await??;Ok(serde_json::json!({"status":status.code(),"success":status.success(),"stdout":stdout,"stderr":stderr,"truncated":stdout.len()>=limit||stderr.len()>=limit}))}_=ctx.interrupt.notified()=>{let _=child.kill().await;Err(LucyError::Cancelled.into())}_=tokio::time::sleep(self.timeout)=>{let _=child.kill().await;Err(anyhow!("shell tool timed out after {} seconds",self.timeout.as_secs()))}}}
 }
 
-async fn read_limited<R: tokio::io::AsyncRead + Unpin>(mut reader: R, limit: usize) -> Result<String> {
-    let mut buf = Vec::with_capacity(limit.min(8192));
-    let mut chunk = [0u8; 8192];
-    loop {
-        let n = reader.read(&mut chunk).await?;
-        if n == 0 { break; }
-        let remaining = limit.saturating_sub(buf.len());
-        buf.extend_from_slice(&chunk[..n.min(remaining)]);
-        if buf.len() >= limit { break; }
-    }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
+pub struct ReadFileTool;
+#[async_trait::async_trait] impl Tool for ReadFileTool{fn name(&self)->&str{"read_file"}fn description(&self)->&str{"Read a UTF-8 text file."}fn parameters_schema(&self)->Value{serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})}async fn execute(&self,input:Value,ctx:ToolContext)->Result<Value>{let p=input.get("path").and_then(Value::as_str).ok_or_else(||anyhow!("path is required"))?;let path=ctx.resolve_path(std::path::Path::new(p));let content=tokio::fs::read_to_string(&path).await?;Ok(serde_json::json!({"path":path,"content":content}))}}
+
+pub struct WriteFileTool;
+#[async_trait::async_trait] impl Tool for WriteFileTool{fn name(&self)->&str{"write_file"}fn description(&self)->&str{"Create or replace a UTF-8 text file."}fn parameters_schema(&self)->Value{serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]})}async fn execute(&self,input:Value,ctx:ToolContext)->Result<Value>{let p=input.get("path").and_then(Value::as_str).ok_or_else(||anyhow!("path is required"))?;let content=input.get("content").and_then(Value::as_str).ok_or_else(||anyhow!("content is required"))?;let path=ctx.resolve_path(std::path::Path::new(p));if let Some(parent)=path.parent(){tokio::fs::create_dir_all(parent).await?;}tokio::fs::write(&path,content).await?;Ok(serde_json::json!({"path":path,"bytes":content.len()}))}}
+
+pub struct ListDirTool;
+#[async_trait::async_trait] impl Tool for ListDirTool{fn name(&self)->&str{"list_dir"}fn description(&self)->&str{"List files and directories."}fn parameters_schema(&self)->Value{serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"]})}async fn execute(&self,input:Value,ctx:ToolContext)->Result<Value>{let p=input.get("path").and_then(Value::as_str).unwrap_or(".");let path=ctx.resolve_path(std::path::Path::new(p));let mut rd=tokio::fs::read_dir(&path).await?;let mut items=Vec::new();while let Some(e)=rd.next_entry().await?{let ft=e.file_type().await?;items.push(serde_json::json!({"name":e.file_name().to_string_lossy(),"directory":ft.is_dir()}));}Ok(serde_json::json!({"path":path,"entries":items}))}}
+
+pub struct SearchFilesTool;
+#[async_trait::async_trait] impl Tool for SearchFilesTool{fn name(&self)->&str{"search_files"}fn description(&self)->&str{"Search text recursively with ripgrep."}fn parameters_schema(&self)->Value{serde_json::json!({"type":"object","properties":{"query":{"type":"string"},"path":{"type":"string"}},"required":["query"]})}async fn execute(&self,input:Value,ctx:ToolContext)->Result<Value>{let query=input.get("query").and_then(Value::as_str).ok_or_else(||anyhow!("query is required"))?;let p=input.get("path").and_then(Value::as_str).unwrap_or(".");let dir=ctx.resolve_path(std::path::Path::new(p));let o=tokio::process::Command::new("rg").arg("--line-number").arg("--hidden").arg("--glob").arg("!.git").arg(query).arg(&dir).output().await?;Ok(serde_json::json!({"success":o.status.success(),"stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr)}))}}
+
+pub struct GitTool;
+#[async_trait::async_trait] impl Tool for GitTool{fn name(&self)->&str{"git"}fn description(&self)->&str{"Run a git command in the working directory."}fn parameters_schema(&self)->Value{serde_json::json!({"type":"object","properties":{"args":{"type":"array","items":{"type":"string"}}},"required":["args"]})}async fn execute(&self,input:Value,ctx:ToolContext)->Result<Value>{let args=input.get("args").and_then(Value::as_array).ok_or_else(||anyhow!("args is required"))?;let args:Vec<String>=args.iter().filter_map(Value::as_str).map(str::to_owned).collect();let dir=ctx.working_dir.clone().unwrap_or(std::env::current_dir()?);let o=tokio::process::Command::new("git").args(&args).current_dir(dir).output().await?;Ok(serde_json::json!({"success":o.status.success(),"stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr),"status":o.status.code()}))}}
+
+pub fn default_registry()->ToolRegistry{let mut r=ToolRegistry::new();r.register(ShellTool::default());r.register(ReadFileTool);r.register(WriteFileTool);r.register(ListDirTool);r.register(SearchFilesTool);r.register(GitTool);r}
+
+async fn read_limited<R:tokio::io::AsyncRead+Unpin>(mut reader:R,limit:usize)->Result<String>{let mut buf=Vec::with_capacity(limit.min(8192));let mut chunk=[0u8;8192];loop{let n=reader.read(&mut chunk).await?;if n==0{break;}let rem=limit.saturating_sub(buf.len());buf.extend_from_slice(&chunk[..n.min(rem)]);if buf.len()>=limit{break;}}Ok(String::from_utf8_lossy(&buf).into_owned())}
