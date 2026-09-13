@@ -1156,9 +1156,12 @@ name = "lucy-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "futures",
  "lucy-core",
  "lucy-tools",
+ "reqwest",
+ "serde",
  "serde_json",
  "tokio",
  "tracing",
