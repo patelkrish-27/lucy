@@ -8,8 +8,11 @@ license.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 lucy-agent = { path = "../lucy-agent" }
 lucy-core = { path = "../lucy-core" }
+lucy-config = { path = "../lucy-config" }
 lucy-hyprfast = { path = "../lucy-hyprfast" }
 lucy-mcp = { path = "../lucy-mcp" }
 lucy-tools = { path = "../lucy-tools" }
