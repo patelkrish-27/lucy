@@ -49,16 +49,70 @@ impl Default for InterruptSignal { fn default() -> Self { Self::new() } }
 pub struct SessionId(pub Uuid);
 impl Default for SessionId { fn default() -> Self { Self(Uuid::new_v4()) } }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolCall { pub id: String, pub name: String, pub input: Value }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolResult { pub call_id: String, pub name: String, pub output: Value, pub is_error: bool }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssistantTurn {
+    pub text: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+}
+
+impl Serialize for AssistantTurn {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct FullAssistantTurn<'a> {
+            #[serde(default, skip_serializing_if = "Option::is_none")]
+            text: &'a Option<String>,
+            #[serde(default, skip_serializing_if = "Vec::is_empty")]
+            tool_calls: &'a [ToolCall],
+        }
+
+        FullAssistantTurn {
+            text: &self.text,
+            tool_calls: &self.tool_calls,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for AssistantTurn {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Compatibility {
+            LegacyText(String),
+            Structured {
+                #[serde(default)]
+                text: Option<String>,
+                #[serde(default)]
+                tool_calls: Vec<ToolCall>,
+            },
+        }
+
+        match Compatibility::deserialize(deserializer)? {
+            Compatibility::LegacyText(text) => Ok(Self {
+                text: Some(text),
+                tool_calls: Vec::new(),
+            }),
+            Compatibility::Structured { text, tool_calls } => Ok(Self { text, tool_calls }),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TurnMessage {
     User(String),
-    Assistant(String),
+    Assistant(AssistantTurn),
     Tool(ToolResult),
 }
 
@@ -95,4 +149,21 @@ pub trait Tool: Send + Sync { fn name(&self) -> &str; fn description(&self) -> &
 #[async_trait::async_trait]
 pub trait ModelProvider: Send + Sync {
     async fn run_turn(&self, request: ModelRequest, events: mpsc::UnboundedSender<AgentEvent>, interrupt: InterruptSignal) -> anyhow::Result<ModelTurn>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_turn_deserializes_legacy_string() {
+        let message: TurnMessage = serde_json::from_str(r#"{"Assistant":"hello"}"#).expect("legacy message should deserialize");
+        match message {
+            TurnMessage::Assistant(turn) => {
+                assert_eq!(turn.text.as_deref(), Some("hello"));
+                assert!(turn.tool_calls.is_empty());
+            }
+            _ => panic!("expected assistant message"),
+        }
+    }
 }

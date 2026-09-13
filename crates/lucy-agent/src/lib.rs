@@ -59,8 +59,11 @@ async fn run_loop<P: ModelProvider>(
 
         if let Some(text) = turn.text.clone() {
             let _ = tx.send(AgentEvent::TextDelta { text: text.clone() });
-            history.push(TurnMessage::Assistant(text));
         }
+        history.push(TurnMessage::Assistant(AssistantTurn {
+            text: turn.text.clone(),
+            tool_calls: turn.tool_calls.clone(),
+        }));
 
         if turn.tool_calls.is_empty() || turn.stop {
             break;
@@ -105,4 +108,239 @@ async fn run_loop<P: ModelProvider>(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anyhow::anyhow;
+    use serde_json::json;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    struct RecordingProvider {
+        turns: Mutex<VecDeque<ModelTurn>>,
+        requests: Mutex<Vec<ModelRequest>>,
+    }
+
+    impl RecordingProvider {
+        fn new(turns: Vec<ModelTurn>) -> Self {
+            Self {
+                turns: Mutex::new(turns.into()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<ModelRequest> {
+            self.requests.lock().expect("requests lock poisoned").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for RecordingProvider {
+        async fn run_turn(
+            &self,
+            request: ModelRequest,
+            _events: mpsc::UnboundedSender<AgentEvent>,
+            _interrupt: InterruptSignal,
+        ) -> anyhow::Result<ModelTurn> {
+            self.requests.lock().expect("requests lock poisoned").push(request);
+            self.turns
+                .lock()
+                .expect("turns lock poisoned")
+                .pop_front()
+                .ok_or_else(|| anyhow!("no turns left"))
+        }
+    }
+
+    struct DelayEchoTool;
+    #[async_trait::async_trait]
+    impl Tool for DelayEchoTool {
+        fn name(&self) -> &str {
+            "delay_echo"
+        }
+        fn description(&self) -> &str {
+            "delayed echo"
+        }
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({
+                "type":"object",
+                "properties":{
+                    "delay_ms":{"type":"integer"},
+                    "result":{"type":"string"}
+                },
+                "required":["delay_ms","result"]
+            })
+        }
+        async fn execute(&self, input: serde_json::Value, _ctx: ToolContext) -> anyhow::Result<serde_json::Value> {
+            let delay_ms = input
+                .get("delay_ms")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| anyhow!("delay_ms is required"))?;
+            let result = input
+                .get("result")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow!("result is required"))?;
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            Ok(json!(result))
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_assistant_tool_calls_and_tool_results_in_history() {
+        let provider = Arc::new(RecordingProvider::new(vec![
+            ModelTurn {
+                text: Some("Thinking".into()),
+                tool_calls: vec![ToolCall {
+                    id: "tool-1".into(),
+                    name: "delay_echo".into(),
+                    input: json!({"delay_ms": 1, "result": "ok"}),
+                }],
+                stop: false,
+            },
+            ModelTurn {
+                text: Some("Done".into()),
+                tool_calls: vec![],
+                stop: true,
+            },
+        ]));
+        let mut registry = ToolRegistry::new();
+        registry.register(DelayEchoTool);
+        let tools = Arc::new(registry);
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        run_loop(
+            provider.clone(),
+            tools,
+            "hello".into(),
+            None,
+            InterruptSignal::new(),
+            tx,
+        )
+        .await
+        .expect("agent loop should succeed");
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].history.len(), 1);
+
+        let second_history = &requests[1].history;
+        assert!(matches!(second_history[0], TurnMessage::User(_)));
+        match &second_history[1] {
+            TurnMessage::Assistant(turn) => {
+                assert_eq!(turn.text.as_deref(), Some("Thinking"));
+                assert_eq!(turn.tool_calls.len(), 1);
+                assert_eq!(turn.tool_calls[0].id, "tool-1");
+            }
+            _ => panic!("expected assistant turn with tool calls"),
+        }
+        match &second_history[2] {
+            TurnMessage::Tool(result) => {
+                assert_eq!(result.call_id, "tool-1");
+                assert_eq!(result.output, json!("ok"));
+            }
+            _ => panic!("expected tool result"),
+        }
+    }
+
+    #[tokio::test]
+    async fn preserves_tool_result_order_for_concurrent_tool_calls() {
+        let provider = Arc::new(RecordingProvider::new(vec![
+            ModelTurn {
+                text: None,
+                tool_calls: vec![
+                    ToolCall {
+                        id: "first".into(),
+                        name: "delay_echo".into(),
+                        input: json!({"delay_ms": 50, "result": "first"}),
+                    },
+                    ToolCall {
+                        id: "second".into(),
+                        name: "delay_echo".into(),
+                        input: json!({"delay_ms": 1, "result": "second"}),
+                    },
+                ],
+                stop: false,
+            },
+            ModelTurn {
+                text: Some("done".into()),
+                tool_calls: vec![],
+                stop: true,
+            },
+        ]));
+        let mut registry = ToolRegistry::new();
+        registry.register(DelayEchoTool);
+        let tools = Arc::new(registry);
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        run_loop(
+            provider.clone(),
+            tools,
+            "order".into(),
+            None,
+            InterruptSignal::new(),
+            tx,
+        )
+        .await
+        .expect("agent loop should succeed");
+
+        let requests = provider.requests();
+        assert_eq!(requests.len(), 2);
+        let second_history = &requests[1].history;
+        let tool_results: Vec<&ToolResult> = second_history
+            .iter()
+            .filter_map(|m| match m {
+                TurnMessage::Tool(result) => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_results.len(), 2);
+        assert_eq!(tool_results[0].call_id, "first");
+        assert_eq!(tool_results[1].call_id, "second");
+    }
+
+    #[tokio::test]
+    async fn returns_cancelled_when_interrupt_is_set() {
+        let provider = Arc::new(RecordingProvider::new(vec![]));
+        let tools = Arc::new(ToolRegistry::new());
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let interrupt = InterruptSignal::new();
+        interrupt.fire();
+
+        let err = run_loop(provider, tools, "cancel".into(), None, interrupt, tx)
+            .await
+            .expect_err("run loop should cancel");
+        assert!(err.to_string().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn enforces_tool_turn_limit() {
+        let repeated_turn = ModelTurn {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "loop".into(),
+                name: "delay_echo".into(),
+                input: json!({"delay_ms": 0, "result": "loop"}),
+            }],
+            stop: false,
+        };
+        let provider = Arc::new(RecordingProvider::new(vec![repeated_turn; MAX_TOOL_TURNS + 1]));
+        let mut registry = ToolRegistry::new();
+        registry.register(DelayEchoTool);
+        let tools = Arc::new(registry);
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let err = run_loop(
+            provider,
+            tools,
+            "loop".into(),
+            None,
+            InterruptSignal::new(),
+            tx,
+        )
+        .await
+        .expect_err("run loop should stop at turn limit");
+        assert!(err.to_string().contains("tool-turn limit reached"));
+    }
 }
