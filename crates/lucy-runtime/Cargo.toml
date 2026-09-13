@@ -13,3 +13,4 @@ lucy-agent = { path = "../lucy-agent" }
 lucy-core = { path = "../lucy-core" }
 lucy-mcp = { path = "../lucy-mcp" }
 lucy-tools = { path = "../lucy-tools" }
+lucy-hyprfast = { path = "../lucy-hyprfast" }
