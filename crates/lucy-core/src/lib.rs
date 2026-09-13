@@ -4,6 +4,8 @@ use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::{mpsc, Notify};
 use uuid::Uuid;
+mod session;
+pub use session::SessionData;
 
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)] pub enum ExecutionMode{Agent,Direct}
 #[derive(Debug,Clone,Copy,PartialEq,Eq,Serialize,Deserialize)] pub enum InterruptSource{User,System,BackgroundTask}
