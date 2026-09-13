@@ -5,6 +5,7 @@ members = [
   "crates/lucy-agent",
   "crates/lucy-tools",
   "crates/lucy-mcp",
+  "crates/lucy-hyprfast",
   "crates/lucy-tui",
   "crates/lucy-cli",
   "crates/lucy-stt",
