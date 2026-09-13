@@ -1,0 +1,42 @@
+# Lucy configuration
+# Secrets such as OPENAI_API_KEY and GROQ_API_KEY stay in environment variables.
+
+[general]
+startup_screen = "mascot"
+compact_after_command = true
+
+[models]
+main = "gpt-4o"
+planner = "gpt-4o-mini"
+# base_url = "https://api.openai.com/v1"
+
+[planner]
+max_subtasks = 32
+max_depth = 8
+verify_state = true
+parallel = true
+replan_on_failure = true
+
+[voice]
+provider = "groq"
+model = "whisper-large-v3-turbo"
+# language = "en"
+push_to_talk = "super+c"
+
+[hyprfast]
+command = "hyprfast"
+args = ["mcp"]
+max_candidates = 8
+batching = true
+parallel = true
+verify_actions = true
+
+[appearance]
+theme = "lucy"
+animations = true
+activity_verbosity = "normal"
+
+[sessions]
+resume = true
+max_history = 100
+# file = "/custom/path/session.json"
