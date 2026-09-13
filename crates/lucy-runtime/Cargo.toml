@@ -13,3 +13,4 @@ lucy-core = { path = "../lucy-core" }
 lucy-hyprfast = { path = "../lucy-hyprfast" }
 lucy-mcp = { path = "../lucy-mcp" }
 lucy-tools = { path = "../lucy-tools" }
+lucy-config = { path = "../lucy-config" }
