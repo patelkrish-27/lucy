@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::{env, fs, path::{Path, PathBuf}};
 
@@ -13,7 +13,6 @@ pub struct LucyConfig {
     pub appearance: AppearanceConfig,
     pub sessions: SessionConfig,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralConfig { pub startup_screen: String, pub compact_after_command: bool }
@@ -51,7 +50,6 @@ impl LucyConfig {
         let home = env::var_os("HOME").context("HOME is not set")?;
         Ok(PathBuf::from(home).join(".config/lucy/config.toml"))
     }
-
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
         let mut cfg = if path.exists() {
@@ -62,7 +60,6 @@ impl LucyConfig {
         cfg.validate()?;
         Ok(cfg)
     }
-
     pub fn save(&self) -> Result<()> {
         self.validate()?;
         let path = Self::path()?;
@@ -70,34 +67,26 @@ impl LucyConfig {
         fs::write(&path, toml::to_string_pretty(self)?)?;
         Ok(())
     }
-
-    pub fn init_if_missing(&self) -> Result<()> {
-        let path = Self::path()?;
-        if !path.exists() { self.save()?; }
-        Ok(())
-    }
-
+    pub fn init_if_missing(&self) -> Result<()> { if !Self::path()?.exists() { self.save()?; } Ok(()) }
     pub fn get(&self, key: &str) -> Result<String> {
         let value = toml::Value::try_from(self)?;
-        value.get(key).map(|v| v.to_string().trim_matches('"').to_string()).ok_or_else(|| anyhow::anyhow!("unknown config key: {key}"))
+        let mut cur = &value;
+        for part in key.split('.') { cur = cur.get(part).ok_or_else(|| anyhow::anyhow!("unknown config key: {key}"))?; }
+        Ok(cur.to_string().trim_matches('"').to_string())
     }
-
     pub fn set(&mut self, key: &str, raw: &str) -> Result<()> {
         let mut value = toml::Value::try_from(&*self)?;
-        let parts: Vec<_> = key.split('.').collect();
+        let parts: Vec<_> = key.split('.').filter(|p| !p.is_empty()).collect();
         if parts.is_empty() { bail!("empty config key"); }
         let mut cur = &mut value;
-        for p in &parts[..parts.len()-1] {
-            cur = cur.get_mut(*p).ok_or_else(|| anyhow::anyhow!("unknown config key: {key}"))?;
-        }
-        let slot = cur.get_mut(parts[parts.len()-1]).ok_or_else(|| anyhow::anyhow!("unknown config key: {key}"))?;
-        *slot = parse_value(raw, slot)?;
-        *self = slotless_from_value(value)?;
+        for part in &parts[..parts.len()-1] { cur = cur.get_mut(*part).ok_or_else(|| anyhow::anyhow!("unknown config key: {key}"))?; }
+        let last = parts[parts.len()-1];
+        let old = cur.get(last).ok_or_else(|| anyhow::anyhow!("unknown config key: {key}"))?.clone();
+        cur[last] = parse_value(raw, &old)?;
+        *self = value.try_into()?;
         self.validate()
     }
-
     pub fn reset(&mut self) { *self = Self::default(); }
-
     pub fn validate(&self) -> Result<()> {
         if self.planner.max_subtasks == 0 || self.planner.max_subtasks > 256 { bail!("planner.max_subtasks must be between 1 and 256"); }
         if self.planner.max_depth == 0 || self.planner.max_depth > 64 { bail!("planner.max_depth must be between 1 and 64"); }
@@ -105,7 +94,6 @@ impl LucyConfig {
         if self.sessions.max_history == 0 { bail!("sessions.max_history must be greater than 0"); }
         Ok(())
     }
-
     fn apply_env(&mut self) -> Result<()> {
         if let Some(v) = env::var_os("OPENAI_MODEL") { self.models.main = v.to_string_lossy().into_owned(); }
         if let Some(v) = env::var_os("LUCY_PLANNER_MODEL") { self.models.planner = v.to_string_lossy().into_owned(); }
@@ -116,27 +104,20 @@ impl LucyConfig {
         Ok(())
     }
 }
-
 fn parse_value(raw: &str, old: &toml::Value) -> Result<toml::Value> {
-    if matches!(old, toml::Value::String(_)) { return Ok(toml::Value::String(raw.to_string())); }
-    raw.parse::<toml::Value>().map_err(|e| anyhow::anyhow!("invalid TOML value: {e}"))
+    if matches!(old, toml::Value::String(_)) { return Ok(toml::Value::String(raw.to_owned())); }
+    raw.parse::<toml::Value>().map_err(|e| anyhow::anyhow!("invalid value: {e}"))
 }
-fn slotless_from_value(value: toml::Value) -> Result<LucyConfig> { Ok(value.try_into()?) }
-
 pub fn doctor() -> Vec<(&'static str, bool, String)> {
-    let cfg = LucyConfig::load();
-    match cfg {
+    match LucyConfig::load() {
         Ok(c) => vec![
-            ("Config", true, SelfPath::display()),
+            ("Config", true, LucyConfig::path().map(|p| p.display().to_string()).unwrap_or_default()),
             ("Planner", true, c.models.planner),
             ("HyprFast", command_exists(&c.hyprfast.command), c.hyprfast.command),
         ],
         Err(e) => vec![("Config", false, e.to_string())],
     }
 }
-struct SelfPath;
-impl SelfPath { fn display() -> String { LucyConfig::path().map(|p| p.display().to_string()).unwrap_or_else(|_| "unknown".into()) } }
-fn command_exists(command: &str) -> bool { std::process::Command::new("sh").args(["-c", &format!("command -v {} >/dev/null 2>&1", command)]).status().map(|s| s.success()).unwrap_or(false) }
-
+fn command_exists(command: &str) -> bool { std::process::Command::new("sh").args(["-c", &format!("command -v '{}' >/dev/null 2>&1", command.replace(''', "'\\''"))]).status().map(|s| s.success()).unwrap_or(false) }
 pub fn config_path() -> Result<PathBuf> { LucyConfig::path() }
 pub fn config_exists() -> Result<bool> { Ok(Path::new(&LucyConfig::path()?).exists()) }
