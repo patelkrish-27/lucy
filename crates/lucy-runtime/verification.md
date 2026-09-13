@@ -1,1 +1,0 @@
-Verification policy: state-changing HyprFast commands are followed by a read-only observation subtask when planner state verification and HyprFast action verification are enabled. The main model interprets the observation and can replan; the cheap model only compiles each observation into one exact HyprFast command.
