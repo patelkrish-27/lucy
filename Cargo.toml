@@ -8,6 +8,7 @@ members = [
   "crates/lucy-tui",
   "crates/lucy-cli",
   "crates/lucy-stt",
+  "crates/lucy-runtime",
 ]
 
 [workspace.package]
