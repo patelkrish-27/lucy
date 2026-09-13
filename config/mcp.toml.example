@@ -1,6 +1,8 @@
 # Copy to ~/.config/lucy/mcp.toml
-# Each server is started on demand for a tool call.
+# HyprFast is built in: Lucy automatically starts `hyprfast mcp` when
+# the executable is available. You do NOT need to add it here.
 
+# Other MCP servers can be added below and are started when Lucy initializes.
 # [[servers]]
 # name = "slack"
 # command = "npx"
