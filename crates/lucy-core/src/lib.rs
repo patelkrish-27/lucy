@@ -23,5 +23,5 @@ impl Default for InterruptSignal{fn default()->Self{Self::new()}}
 #[derive(Debug,Clone)]pub struct ToolContext{pub session_id:SessionId,pub tool_call_id:String,pub working_dir:Option<PathBuf>,pub execution_mode:ExecutionMode,pub events:mpsc::UnboundedSender<AgentEvent>,pub interrupt:InterruptSignal}
 impl ToolContext{pub fn resolve_path(&self,path:&Path)->PathBuf{if path.is_absolute(){path.to_path_buf()}else if let Some(base)=&self.working_dir{base.join(path)}else{path.to_path_buf()}}}
 #[derive(Debug,Error)]pub enum LucyError{#[error("cancelled")]Cancelled,#[error("tool not found: {0}")]ToolNotFound(String),#[error("invalid input: {0}")]InvalidInput(String),#[error("provider error: {0}")]Provider(String)}
-#[async_trait::async_trait]pub trait Tool:Send+Sync{fn name(&self)->&str;fn description(&self)->&str;fn parameters_schema(&self)->Value;async fn execute(&self,input:Value,ctx:ToolContext)->anyhow::Result<Value>}
-#[async_trait::async_trait]pub trait ModelProvider:Send+Sync{async fn run_turn(&self,request:ModelRequest,events:mpsc::UnboundedSender<AgentEvent>,interrupt:InterruptSignal)->anyhow::Result<ModelTurn>}
+#[async_trait::async_trait]pub trait Tool:Send+Sync{fn name(&self)->&str;fn description(&self)->&str;fn parameters_schema(&self)->Value;async fn execute(&self,input:Value,ctx:ToolContext)->anyhow::Result<Value>;}
+#[async_trait::async_trait]pub trait ModelProvider:Send+Sync{async fn run_turn(&self,request:ModelRequest,events:mpsc::UnboundedSender<AgentEvent>,interrupt:InterruptSignal)->anyhow::Result<ModelTurn>;}
