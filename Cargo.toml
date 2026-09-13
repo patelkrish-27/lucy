@@ -10,6 +10,7 @@ members = [
   "crates/lucy-tui",
   "crates/lucy-cli",
   "crates/lucy-stt",
+  "crates/lucy-config",
 ]
 
 [workspace.package]
