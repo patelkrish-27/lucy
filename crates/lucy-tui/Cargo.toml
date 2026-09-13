@@ -12,3 +12,4 @@ tokio.workspace = true
 lucy-core = { path = "../lucy-core" }
 lucy-runtime = { path = "../lucy-runtime" }
 lucy-stt = { path = "../lucy-stt" }
+lucy-config = { path = "../lucy-config" }
