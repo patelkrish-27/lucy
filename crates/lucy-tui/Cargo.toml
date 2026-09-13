@@ -9,4 +9,6 @@ anyhow.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
+lucy-core = { path = "../lucy-core" }
+lucy-runtime = { path = "../lucy-runtime" }
 lucy-stt = { path = "../lucy-stt" }
