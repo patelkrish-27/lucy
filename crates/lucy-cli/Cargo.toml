@@ -12,6 +12,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 lucy-agent = { path = "../lucy-agent" }
