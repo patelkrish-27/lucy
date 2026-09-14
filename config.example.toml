@@ -8,16 +8,23 @@ startup_screen = "mascot"
 compact_after_command = true
 
 [models]
-main = "gpt-4o"
-planner = "gpt-4o-mini"
-# Any-brand LLM: set API key and endpoint for your provider
-# api_key = "sk-... or anthropic-key or gemini-key"
-# base_url = "https://api.openai.com/v1"          # OpenAI (default)
-# base_url = "https://api.anthropic.com"           # Anthropic (OpenAI-compatible via proxy)
-# base_url = "https://generativelanguage.googleapis.com/v1beta/openai/" # Gemini OpenAI compat
-# base_url = "https://api.groq.com/openai/v1"      # Groq
-# base_url = "https://api.mistral.ai/v1"           # Mistral
-# base_url = "http://localhost:11434/v1"           # Ollama / local
+# Main = OpenChat, Cheap = Gemini 3.5 Flash-Lite (per your request)
+main = "openchat"
+planner = "gemini-3.5-flash-lite"
+hyprfast_command = "gemini-3.5-flash-lite"
+
+# --- Per-model credentials (recommended) ---
+# Main (OpenChat) — put your OpenChat API key + endpoint here
+# main_api_key = "openchat-sk-..."
+# main_base_url = "https://api.openchat.ai/v1"
+
+# Cheap (Gemini 3.5 Flash-Lite) — direct Gemini key + OpenAI-compatible endpoint
+# cheap_api_key = "AIza..."  # your Gemini API key
+# cheap_base_url = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+# --- Legacy generic fallback (used if per-model not set) ---
+# api_key = "sk-..."  # fallback for both models
+# base_url = "https://api.openai.com/v1"
 
 [planner]
 max_subtasks = 32

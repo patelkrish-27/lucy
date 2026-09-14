@@ -1,10 +1,11 @@
 use lucy_config::LucyConfig;
 use ratatui::{layout::{Alignment,Constraint,Direction,Layout,Rect},style::{Color,Modifier,Style},text::{Line,Span},widgets::{Block,Borders,Clear,List,ListItem,Paragraph},Frame};
 
-pub const ITEMS: [&str; 14] = [
-    "Main model","HyprFast command model","LLM API Key (any brand)","LLM Endpoint / Base URL",
-    "Planner max subtasks","Planner max depth","HyprFast candidates","HyprFast batching",
-    "HyprFast parallel","Verify actions","Voice model","Voice API Key","Voice hotkey","Session resume"
+pub const ITEMS: [&str; 16] = [
+    "Main model (OpenChat)","Cheap model (Gemini 3.5 Flash-Lite)","Main API Key — OpenChat","Main Endpoint — OpenChat",
+    "Cheap API Key — Gemini","Cheap Endpoint — Gemini","Planner max subtasks","Planner max depth",
+    "HyprFast candidates","HyprFast batching","HyprFast parallel","Verify actions",
+    "Voice model","Voice API Key","Voice hotkey","Session resume"
 ];
 
 fn mask(k:&Option<String>)->String{
@@ -18,7 +19,6 @@ fn mask(k:&Option<String>)->String{
 
 pub fn draw(frame:&mut Frame<'_>, area:Rect, cfg:&LucyConfig, selected:usize) {
     let popup=Rect{x:area.width/10,y:area.height/10,width:area.width*8/10,height:area.height*8/10};
-    // Solid background to prevent foreground/background mixing — clear underlying UI
     let popup_style = Style::default().bg(Color::Rgb(25, 25, 35)).fg(Color::White);
     let block_style = Style::default().bg(Color::Rgb(25, 25, 35)).fg(Color::White);
     let block=Block::default()
@@ -26,11 +26,9 @@ pub fn draw(frame:&mut Frame<'_>, area:Rect, cfg:&LucyConfig, selected:usize) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Cyan).bg(Color::Rgb(25, 25, 35)))
         .style(popup_style);
-    // Clear area first so underlying text doesn't bleed through
     frame.render_widget(Clear, popup);
     frame.render_widget(block.clone(),popup);
     let inner=block.inner(popup);
-    // Inner area with solid background
     frame.render_widget(Block::default().style(popup_style), inner);
     let cols=Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(45),Constraint::Percentage(55)]).split(inner);
     let items=ITEMS.iter().enumerate().map(|(i,s)|{
@@ -41,32 +39,33 @@ pub fn draw(frame:&mut Frame<'_>, area:Rect, cfg:&LucyConfig, selected:usize) {
         };
         ListItem::new(Line::from(vec![if i==selected{Span::styled("▶ ", style)}else{Span::styled("  ", style)},Span::styled(*s, style)])).style(style)
     }).collect::<Vec<_>>();
-    // List with background
     let list_block = Block::default().borders(Borders::ALL).border_style(block_style).title(" Option ").style(popup_style);
     let list_area = cols[0];
     frame.render_widget(List::new(items).block(list_block).style(popup_style), list_area);
 
-    // Show raw value when editing text fields, masked otherwise so user sees what they type
-    let is_text_field = matches!(selected, 0|1|2|3|10|11|12);
+    let is_text_field = matches!(selected, 0|1|2|3|4|5|12|13|14);
     let raw = raw_value(cfg, selected);
     let display_value = match selected {
-        2|11 => {
-            // API keys: show raw while selected (so typing is visible), masked otherwise would hide typing
+        2|4|13 => {
             if raw.is_empty() { "(not set) — type to edit".into() } else { raw.clone() }
         },
-        3 => {
-            if raw.is_empty() { "https://api.openai.com/v1 (default) — type endpoint".into() } else { raw.clone() }
+        3|5 => {
+            if raw.is_empty() {
+                if selected==3 { "https://api.openchat.ai/v1 (default) — type endpoint".into() }
+                else { "https://generativelanguage.googleapis.com/v1beta/openai/ (Gemini)".into() }
+            } else { raw.clone() }
         },
         _ if is_text_field => {
             if raw.is_empty() { "(empty) — type to edit".into() } else { raw.clone() }
         },
         _ => {
-            // non-text fields use formatted values
             let all_values=[
                 cfg.models.main.clone(),
                 cfg.models.hyprfast_command.clone(),
-                mask(&cfg.models.api_key),
-                cfg.models.base_url.clone().unwrap_or_else(||"https://api.openai.com/v1 (default)".into()),
+                mask(&cfg.models.main_api_key.clone().or_else(|| cfg.models.api_key.clone())),
+                cfg.models.main_base_url.clone().or_else(|| cfg.models.base_url.clone()).unwrap_or_else(||"https://api.openchat.ai/v1".into()),
+                mask(&cfg.models.cheap_api_key.clone().or_else(|| cfg.models.api_key.clone())),
+                cfg.models.cheap_base_url.clone().or_else(|| cfg.models.base_url.clone()).unwrap_or_else(||"https://generativelanguage.googleapis.com/v1beta/openai/".into()),
                 cfg.planner.max_subtasks.to_string(),
                 cfg.planner.max_depth.to_string(),
                 cfg.hyprfast.max_candidates.to_string(),
@@ -81,19 +80,16 @@ pub fn draw(frame:&mut Frame<'_>, area:Rect, cfg:&LucyConfig, selected:usize) {
             all_values[selected].clone()
         }
     };
-    // Add editing hint and make background solid
     let value_title = if is_text_field { " Value (typing edits immediately) " } else { " Value " };
     let detail_block = Block::default().title(value_title).borders(Borders::ALL).border_style(block_style).style(popup_style);
     let detail_area = cols[1];
     frame.render_widget(detail_block.clone(), detail_area);
     let inner_detail = detail_block.inner(detail_area);
-    // Value paragraph with solid bg and wrapping
     let value_paragraph = Paragraph::new(display_value.clone())
         .alignment(Alignment::Center)
         .style(Style::default().bg(Color::Rgb(30, 30, 45)).fg(if is_text_field { Color::Yellow } else { Color::White }))
         .wrap(ratatui::widgets::Wrap{trim:false});
     frame.render_widget(value_paragraph, inner_detail);
-    // If text field, show cursor at end of text
     if is_text_field {
         let cursor_x = inner_detail.x + (inner_detail.width.saturating_sub(display_value.len() as u16 + 2)) / 2 + display_value.len() as u16 + 1;
         let cursor_y = inner_detail.y + inner_detail.height / 2;
@@ -108,13 +104,13 @@ pub fn draw(frame:&mut Frame<'_>, area:Rect, cfg:&LucyConfig, selected:usize) {
 
 pub fn change(cfg:&mut LucyConfig, selected:usize, direction:i8) {
     match selected {
-        4=>{let v=cfg.planner.max_subtasks as i32+direction as i32;cfg.planner.max_subtasks=v.clamp(1,256) as usize;}
-        5=>{let v=cfg.planner.max_depth as i32+direction as i32;cfg.planner.max_depth=v.clamp(1,64) as usize;}
-        6=>{let v=cfg.hyprfast.max_candidates as i32+direction as i32;cfg.hyprfast.max_candidates=v.clamp(1,68) as usize;}
-        7=>cfg.hyprfast.batching=!cfg.hyprfast.batching,
-        8=>cfg.hyprfast.parallel=!cfg.hyprfast.parallel,
-        9=>cfg.hyprfast.verify_actions=!cfg.hyprfast.verify_actions,
-        13=>cfg.sessions.resume=!cfg.sessions.resume,
+        6=>{let v=cfg.planner.max_subtasks as i32+direction as i32;cfg.planner.max_subtasks=v.clamp(1,256) as usize;}
+        7=>{let v=cfg.planner.max_depth as i32+direction as i32;cfg.planner.max_depth=v.clamp(1,64) as usize;}
+        8=>{let v=cfg.hyprfast.max_candidates as i32+direction as i32;cfg.hyprfast.max_candidates=v.clamp(1,68) as usize;}
+        9=>cfg.hyprfast.batching=!cfg.hyprfast.batching,
+        10=>cfg.hyprfast.parallel=!cfg.hyprfast.parallel,
+        11=>cfg.hyprfast.verify_actions=!cfg.hyprfast.verify_actions,
+        15=>cfg.sessions.resume=!cfg.sessions.resume,
         _=>{}
     }
 }
@@ -123,11 +119,13 @@ pub fn edit_text(cfg:&mut LucyConfig,selected:usize,value:&str){
     match selected{
         0=>cfg.models.main=v,
         1=>cfg.models.hyprfast_command=v,
-        2=>cfg.models.api_key=if v.is_empty()||v=="(not set)"{None}else{Some(v)},
-        3=>cfg.models.base_url=if v.is_empty()||v=="(not set)"||v.contains("(default)"){None}else{Some(v)},
-        10=>cfg.voice.model=v,
-        11=>cfg.voice.api_key=if v.is_empty()||v=="(not set)"{None}else{Some(v)},
-        12=>cfg.voice.push_to_talk=v,
+        2=>cfg.models.main_api_key=if v.is_empty()||v=="(not set)"{None}else{Some(v)},
+        3=>cfg.models.main_base_url=if v.is_empty()||v=="(not set)"||v.contains("(default)"){None}else{Some(v)},
+        4=>cfg.models.cheap_api_key=if v.is_empty()||v=="(not set)"{None}else{Some(v)},
+        5=>cfg.models.cheap_base_url=if v.is_empty()||v=="(not set)"||v.contains("(default)"){None}else{Some(v)},
+        12=>cfg.voice.model=v,
+        13=>cfg.voice.api_key=if v.is_empty()||v=="(not set)"{None}else{Some(v)},
+        14=>cfg.voice.push_to_talk=v,
         _=>{}
     }
 }
@@ -135,11 +133,13 @@ pub fn raw_value(cfg:&LucyConfig,selected:usize)->String{
     match selected{
         0=>cfg.models.main.clone(),
         1=>cfg.models.hyprfast_command.clone(),
-        2=>cfg.models.api_key.clone().unwrap_or_default(),
-        3=>cfg.models.base_url.clone().unwrap_or_default(),
-        10=>cfg.voice.model.clone(),
-        11=>cfg.voice.api_key.clone().unwrap_or_default(),
-        12=>cfg.voice.push_to_talk.clone(),
+        2=>cfg.models.main_api_key.clone().or_else(|| cfg.models.api_key.clone()).unwrap_or_default(),
+        3=>cfg.models.main_base_url.clone().or_else(|| cfg.models.base_url.clone()).unwrap_or_default(),
+        4=>cfg.models.cheap_api_key.clone().or_else(|| cfg.models.api_key.clone()).unwrap_or_default(),
+        5=>cfg.models.cheap_base_url.clone().or_else(|| cfg.models.base_url.clone()).unwrap_or_default(),
+        12=>cfg.voice.model.clone(),
+        13=>cfg.voice.api_key.clone().unwrap_or_default(),
+        14=>cfg.voice.push_to_talk.clone(),
         _=>String::new(),
     }
 }

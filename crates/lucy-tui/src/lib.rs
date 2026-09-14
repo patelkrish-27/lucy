@@ -148,7 +148,7 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                         KeyCode::Enter=>{ settings::change(&mut app.config,app.settings_selected,1); },
                         KeyCode::Backspace=>{
                             let sel=app.settings_selected;
-                            if matches!(sel,0|1|2|3|10|11|12){
+                            if matches!(sel,0|1|2|3|4|5|12|13|14){
                                 let cur=settings::raw_value(&app.config, sel);
                                 let mut v=cur; v.pop();
                                 settings::edit_text(&mut app.config, sel, &v);
@@ -158,7 +158,7 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                         },
                         KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT|KeyModifiers::SUPER)=>{
                             let sel=app.settings_selected;
-                            if matches!(sel,0|1|2|3|10|11|12){
+                            if matches!(sel,0|1|2|3|4|5|12|13|14){
                                 let cur=settings::raw_value(&app.config, sel);
                                 let next=format!("{cur}{c}");
                                 settings::edit_text(&mut app.config, sel, &next);
