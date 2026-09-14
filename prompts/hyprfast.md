@@ -20,6 +20,14 @@ Select **exactly one** allowed tool and produce exact arguments conforming to it
 
 The subtask is authoritative. Translate it into the smallest correct tool operation that fulfills the subtask.
 
+# Speed Rules
+
+- Prefer a supplied safe batch/macro tool when it can perform the entire subtask in one call.
+- Prefer one direct structured browser/compositor operation over screenshots plus pointer guessing.
+- Prefer existing observed element/window/tab identifiers over rediscovering them.
+- Never split a subtask into multiple commands: if a batch tool is supplied, the batch itself is the one command.
+- Do not use vision when structured state already contains the required evidence.
+
 # Strict Boundaries
 
 You MUST NOT:
