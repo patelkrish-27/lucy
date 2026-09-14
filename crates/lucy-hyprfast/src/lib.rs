@@ -20,6 +20,7 @@ impl HyprFastCatalog {
  pub fn is_empty(&self)->bool{self.tools.is_empty()}
  pub fn by_domain(&self,domain:Domain)->Vec<&ToolCapability>{self.tools.values().filter(|t|t.domain==domain).collect()}
  pub fn summary(&self)->BTreeMap<String,usize>{let mut out=BTreeMap::new();for tool in self.tools.values(){*out.entry(format!("{:?}",tool.domain)).or_insert(0)+=1;}out}
+ pub fn capability_for_mcp_name(&self,name:&str)->Option<&ToolCapability>{self.tools.values().find(|tool|full_name(&tool.name)==name||tool.name==name)}
  pub async fn discover(config:McpServerConfig)->Result<Self>{let client=StdioMcpClient::new(config);let tools=client.list_tools().await.context("failed to discover HyprFast MCP tools")?;Ok(Self::from_tools(tools))}
  pub async fn discover_default()->Result<Self>{Self::discover(default_config()).await}
  pub fn cache_path()->PathBuf{std::env::var("LUCY_HYPRFAST_CACHE").map(PathBuf::from).unwrap_or_else(|_|PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".local/state/lucy/hyprfast-catalog.json"))}
