@@ -37,17 +37,30 @@ impl HyprFastCatalog {
     Route { candidates:selected.into_iter().collect(), strategy:strategy_for(&text), fast_path:is_fast_path(&text) }
   }
   pub fn route_domain(&self,category:&str,goal:&str)->Route{
-    let domain=match category.to_ascii_lowercase().as_str(){
-      "browser"|"stagehand"|"hints" if !goal.is_empty() => { let _=goal; Domain::Browser },
-      _ => match category.to_ascii_lowercase().as_str(){
-        "browser"=>Domain::Browser, "stagehand"=>Domain::Stagehand, "hints"=>Domain::Hints,
-        "vision"=>Domain::Vision, "clipboard"=>Domain::Clipboard, "excalidraw"=>Domain::Excalidraw,
-        "tasks"=>Domain::Tasks, "desktop"=>Domain::Desktop, "system"=>Domain::System, _=>Domain::Unknown,
-      }
+    let category_l=category.to_ascii_lowercase();
+    let text=goal.to_ascii_lowercase();
+    let domain=match category_l.as_str(){
+      "browser"=>Domain::Browser,"stagehand"=>Domain::Stagehand,"hints"=>Domain::Hints,
+      "vision"=>Domain::Vision,"clipboard"=>Domain::Clipboard,"excalidraw"=>Domain::Excalidraw,
+      "tasks"=>Domain::Tasks,"desktop"=>Domain::Desktop,"system"=>Domain::System,_=>Domain::Unknown,
     };
     if domain!=Domain::Unknown{
-      let cands:Vec<String>=self.by_domain(domain).iter().map(|t|full_name(&t.name)).collect();
-      if !cands.is_empty(){ return Route{candidates:cands, strategy:strategy_for(&goal.to_ascii_lowercase()), fast_path:false} }
+      let mut tools:Vec<&ToolCapability>=self.by_domain(domain);
+      // A browser task is normally a navigation/interaction flow, not a request
+      // to create another browser window. Only expose Launch when the user
+      // explicitly asks for a browser/window to be started. This prevents the
+      // command model from doing `launch -> navigate`, which used to create a
+      // second window and duplicate work for requests such as "play X on YouTube".
+      let explicit_launch=has(&text,&["launch browser","start browser","open browser","new browser window","new browser"]);
+      if domain==Domain::Browser && !explicit_launch {
+        tools.retain(|t|!t.capabilities.contains(&Capability::Launch));
+      }
+      tools.sort_by(|a,b|score(&text,b).cmp(&score(&text,a)).then_with(||a.name.cmp(&b.name)));
+      let candidates=tools.into_iter().filter(|t|score(&text,t)>0).take(8).map(|t|full_name(&t.name)).collect::<Vec<_>>();
+      if !candidates.is_empty(){
+        let strategy=if domain==Domain::Browser && has(&text,&["youtube","song","music","play","watch","listen","search"]){"direct-browser-navigation".into()}else{strategy_for(&text)};
+        return Route{candidates,strategy,fast_path:false};
+      }
     }
     self.route(goal)
   }
@@ -73,7 +86,7 @@ fn score(text:&str,t:&ToolCapability)->i32{
  let mut s=0;
  let has=|terms:&[&str]|terms.iter().any(|x|text.contains(x));
  match t.domain { Domain::Browser=>{if has(&["browser","website","web","url","page","tab","youtube","video","music","song","play","watch","listen"]){s+=30}}, Domain::Desktop=>{if has(&["desktop","window","workspace","app","application","monitor"]){s+=30}}, Domain::Vision=>{if has(&["screenshot","screen","see","look","visual"]){s+=35}}, Domain::Hints=>{if has(&["click","select","press","element"]){s+=18}}, Domain::Stagehand=>{if has(&["complex","workflow","browser task"]){s+=16}}, _=>{} }
- for c in &t.capabilities { s+=match c { Capability::Click if has(&["click","select","press"] )=>28, Capability::Type if has(&["type","write","enter","fill","search"] )=>25, Capability::Navigate if has(&["open","go to","navigate","visit","url","play","watch","listen"] )=>28, Capability::Window if has(&["window","workspace","move","focus"] )=>28, Capability::Launch if has(&["open","launch","start","play"] )=>26, Capability::Observe if has(&["see","inspect","find","what","screenshot"] )=>24, Capability::Extract if has(&["read","extract","get","find"] )=>20, Capability::Batch if has(&["batch","many","multiple"] )=>35, Capability::Act if has(&["do","execute","perform","act"] )=>12, _=>0 }; }
+ for c in &t.capabilities { s+=match c { Capability::Click if has(&["click","select","press"] )=>28, Capability::Type if has(&["type","write","enter","fill","search"] )=>25, Capability::Navigate if has(&["open","go to","navigate","visit","url","play","watch","listen","search"] )=>28, Capability::Window if has(&["window","workspace","move","focus"] )=>28, Capability::Launch if has(&["launch","open","start","play"] )=>26, Capability::Observe if has(&["see","inspect","find","what","screenshot"] )=>24, Capability::Extract if has(&["read","extract","get","find"] )=>20, Capability::Batch if has(&["batch","many","multiple"] )=>35, Capability::Act if has(&["do","execute","perform","act"] )=>12, _=>0 }; }
  if t.batchable && has(&["fast","quick","multiple","many"]){s+=18}; if t.read_only && has(&["what","check","show","see"]){s+=8}; if t.destructive && !has(&["close","kill","delete","remove","shutdown"]){s-=50};
  s
 }
@@ -89,4 +102,4 @@ fn classify(tool:&McpToolDefinition)->ToolCapability{
  ToolCapability{name:tool.name.clone(),description:tool.description.clone().unwrap_or_default(),input_schema:tool.input_schema.clone(),domain,capabilities,operation,read_only,destructive,batchable}
 }
 fn has(text:&str,terms:&[&str])->bool{terms.iter().any(|term|text.contains(term))}
-#[cfg(test)]mod tests{use super::*;fn tool(name:&str,description:&str)->McpToolDefinition{McpToolDefinition{name:name.into(),description:Some(description.into()),input_schema:serde_json::json!({"type":"object"})}}#[test]fn categorizes_tools(){let c=HyprFastCatalog::from_tools(vec![tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("act_batch","execute batch"),tool("task_init","start task")]);assert_eq!(c.tools["browser_click"].domain,Domain::Browser);assert!(c.tools["browser_click"].capabilities.contains(&Capability::Click));assert_eq!(c.tools["screenshot"].domain,Domain::Vision);assert!(c.tools["act_batch"].batchable);assert_eq!(c.tools["task_init"].domain,Domain::Tasks);}#[test]fn routes_browser_click(){let c=HyprFastCatalog::from_tools(vec![tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("desktop_window","move workspace window")]);let r=c.route("click the browser button");assert!(r.candidates.iter().any(|x|x.contains("browser_click")));assert_eq!(r.strategy,"hint-first");}#[test]fn routes_play_song_to_browser_tools(){let c=HyprFastCatalog::from_tools(vec![tool("browser_navigate","navigate browser to url"),tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("read_file","read a file")]);let r=c.route("play sammi meri waar song");assert!(r.candidates.iter().any(|x|x.contains("browser_navigate")), "play-song must route to browser tools, got {:?}", r.candidates);}}
+#[cfg(test)]mod tests{use super::*;fn tool(name:&str,description:&str)->McpToolDefinition{McpToolDefinition{name:name.into(),description:Some(description.into()),input_schema:serde_json::json!({"type":"object"})}}#[test]fn categorizes_tools(){let c=HyprFastCatalog::from_tools(vec![tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("act_batch","execute batch"),tool("task_init","start task")]);assert_eq!(c.tools["browser_click"].domain,Domain::Browser);assert!(c.tools["browser_click"].capabilities.contains(&Capability::Click));assert_eq!(c.tools["screenshot"].domain,Domain::Vision);assert!(c.tools["act_batch"].batchable);assert_eq!(c.tools["task_init"].domain,Domain::Tasks);}#[test]fn routes_browser_click(){let c=HyprFastCatalog::from_tools(vec![tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("desktop_window","move workspace window")]);let r=c.route("click the browser button");assert!(r.candidates.iter().any(|x|x.contains("browser_click")));assert_eq!(r.strategy,"hint-first");}#[test]fn routes_play_song_to_browser_tools(){let c=HyprFastCatalog::from_tools(vec![tool("browser_launch","launch browser"),tool("browser_navigate","navigate browser to url"),tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("read_file","read a file")]);let r=c.route("play sammi meri waar song");assert!(r.candidates.iter().any(|x|x.contains("browser_navigate")), "play-song must route to browser tools, got {:?}", r.candidates);}#[test]fn domain_route_does_not_offer_launch_for_youtube_flow(){let c=HyprFastCatalog::from_tools(vec![tool("browser_launch","launch browser"),tool("browser_navigate","navigate browser to url"),tool("browser_click","click browser element"),tool("browser_type","type into browser"),tool("browser_snapshot","observe browser")]);let r=c.route_domain("browser","navigate to YouTube and search for Boom Shaka Laka");assert!(!r.candidates.iter().any(|x|x.contains("browser_launch")));assert!(r.candidates.iter().any(|x|x.contains("browser_navigate")));}#[test]fn domain_route_allows_explicit_browser_launch(){let c=HyprFastCatalog::from_tools(vec![tool("browser_launch","launch browser"),tool("browser_navigate","navigate browser to url")]);let r=c.route_domain("browser","launch browser");assert!(r.candidates.iter().any(|x|x.contains("browser_launch")));}}
