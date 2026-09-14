@@ -1,5 +1,5 @@
 use lucy_config::LucyConfig;
-use ratatui::{layout::{Alignment,Constraint,Direction,Layout,Rect},style::{Modifier,Style},text::{Line,Span},widgets::{Block,Borders,List,ListItem,Paragraph},Frame};
+use ratatui::{layout::{Alignment,Constraint,Direction,Layout,Rect},style::{Color,Modifier,Style},text::{Line,Span},widgets::{Block,Borders,Clear,List,ListItem,Paragraph},Frame};
 
 pub const ITEMS: [&str; 14] = [
     "Main model","HyprFast command model","LLM API Key (any brand)","LLM Endpoint / Base URL",
@@ -18,31 +18,90 @@ fn mask(k:&Option<String>)->String{
 
 pub fn draw(frame:&mut Frame<'_>, area:Rect, cfg:&LucyConfig, selected:usize) {
     let popup=Rect{x:area.width/10,y:area.height/10,width:area.width*8/10,height:area.height*8/10};
-    let block=Block::default().title(" Lucy Settings — any LLM brand via API Key + Endpoint ").borders(Borders::ALL);
+    // Solid background to prevent foreground/background mixing — clear underlying UI
+    let popup_style = Style::default().bg(Color::Rgb(25, 25, 35)).fg(Color::White);
+    let block_style = Style::default().bg(Color::Rgb(25, 25, 35)).fg(Color::White);
+    let block=Block::default()
+        .title(" Lucy Settings — any LLM brand via API Key + Endpoint ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).bg(Color::Rgb(25, 25, 35)))
+        .style(popup_style);
+    // Clear area first so underlying text doesn't bleed through
+    frame.render_widget(Clear, popup);
     frame.render_widget(block.clone(),popup);
     let inner=block.inner(popup);
+    // Inner area with solid background
+    frame.render_widget(Block::default().style(popup_style), inner);
     let cols=Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(45),Constraint::Percentage(55)]).split(inner);
-    let items=ITEMS.iter().enumerate().map(|(i,s)|ListItem::new(Line::from(vec![if i==selected{Span::raw("▶ ")}else{Span::raw("  ")},Span::raw(*s)]))).collect::<Vec<_>>();
-    frame.render_widget(List::new(items),cols[0]);
-    let values=[
-        cfg.models.main.clone(),
-        cfg.models.hyprfast_command.clone(),
-        mask(&cfg.models.api_key),
-        cfg.models.base_url.clone().unwrap_or_else(||"https://api.openai.com/v1 (default)".into()),
-        cfg.planner.max_subtasks.to_string(),
-        cfg.planner.max_depth.to_string(),
-        cfg.hyprfast.max_candidates.to_string(),
-        cfg.hyprfast.batching.to_string(),
-        cfg.hyprfast.parallel.to_string(),
-        cfg.hyprfast.verify_actions.to_string(),
-        cfg.voice.model.clone(),
-        mask(&cfg.voice.api_key),
-        cfg.voice.push_to_talk.clone(),
-        cfg.sessions.resume.to_string()
-    ];
-    let detail=Paragraph::new(values[selected].clone()).alignment(Alignment::Center).block(Block::default().title(" Value ").borders(Borders::ALL));
-    frame.render_widget(detail,cols[1]);
-    let help=Paragraph::new("↑/↓ select  ←/→ change  type to edit  Backspace  Esc close  Ctrl+S save").alignment(Alignment::Center).style(Style::default().add_modifier(Modifier::DIM));
+    let items=ITEMS.iter().enumerate().map(|(i,s)|{
+        let style = if i==selected {
+            Style::default().bg(Color::Rgb(45, 45, 65)).fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().bg(Color::Rgb(25, 25, 35)).fg(Color::White)
+        };
+        ListItem::new(Line::from(vec![if i==selected{Span::styled("▶ ", style)}else{Span::styled("  ", style)},Span::styled(*s, style)])).style(style)
+    }).collect::<Vec<_>>();
+    // List with background
+    let list_block = Block::default().borders(Borders::ALL).border_style(block_style).title(" Option ").style(popup_style);
+    let list_area = cols[0];
+    frame.render_widget(List::new(items).block(list_block).style(popup_style), list_area);
+
+    // Show raw value when editing text fields, masked otherwise so user sees what they type
+    let is_text_field = matches!(selected, 0|1|2|3|10|11|12);
+    let raw = raw_value(cfg, selected);
+    let display_value = match selected {
+        2|11 => {
+            // API keys: show raw while selected (so typing is visible), masked otherwise would hide typing
+            if raw.is_empty() { "(not set) — type to edit".into() } else { raw.clone() }
+        },
+        3 => {
+            if raw.is_empty() { "https://api.openai.com/v1 (default) — type endpoint".into() } else { raw.clone() }
+        },
+        _ if is_text_field => {
+            if raw.is_empty() { "(empty) — type to edit".into() } else { raw.clone() }
+        },
+        _ => {
+            // non-text fields use formatted values
+            let all_values=[
+                cfg.models.main.clone(),
+                cfg.models.hyprfast_command.clone(),
+                mask(&cfg.models.api_key),
+                cfg.models.base_url.clone().unwrap_or_else(||"https://api.openai.com/v1 (default)".into()),
+                cfg.planner.max_subtasks.to_string(),
+                cfg.planner.max_depth.to_string(),
+                cfg.hyprfast.max_candidates.to_string(),
+                cfg.hyprfast.batching.to_string(),
+                cfg.hyprfast.parallel.to_string(),
+                cfg.hyprfast.verify_actions.to_string(),
+                cfg.voice.model.clone(),
+                mask(&cfg.voice.api_key),
+                cfg.voice.push_to_talk.clone(),
+                cfg.sessions.resume.to_string()
+            ];
+            all_values[selected].clone()
+        }
+    };
+    // Add editing hint and make background solid
+    let value_title = if is_text_field { " Value (typing edits immediately) " } else { " Value " };
+    let detail_block = Block::default().title(value_title).borders(Borders::ALL).border_style(block_style).style(popup_style);
+    let detail_area = cols[1];
+    frame.render_widget(detail_block.clone(), detail_area);
+    let inner_detail = detail_block.inner(detail_area);
+    // Value paragraph with solid bg and wrapping
+    let value_paragraph = Paragraph::new(display_value.clone())
+        .alignment(Alignment::Center)
+        .style(Style::default().bg(Color::Rgb(30, 30, 45)).fg(if is_text_field { Color::Yellow } else { Color::White }))
+        .wrap(ratatui::widgets::Wrap{trim:false});
+    frame.render_widget(value_paragraph, inner_detail);
+    // If text field, show cursor at end of text
+    if is_text_field {
+        let cursor_x = inner_detail.x + (inner_detail.width.saturating_sub(display_value.len() as u16 + 2)) / 2 + display_value.len() as u16 + 1;
+        let cursor_y = inner_detail.y + inner_detail.height / 2;
+        frame.set_cursor_position((cursor_x.min(inner_detail.right().saturating_sub(1)), cursor_y));
+    }
+    let help=Paragraph::new("↑/↓ select  ←/→ change  type to edit  Backspace deletes  Esc close  Ctrl+S save")
+        .alignment(Alignment::Center)
+        .style(Style::default().fg(Color::Gray).bg(Color::Rgb(25, 25, 35)).add_modifier(Modifier::DIM));
     let help_area=Rect{x:popup.x+1,y:popup.bottom().saturating_sub(2),width:popup.width.saturating_sub(2),height:1};
     frame.render_widget(help,help_area);
 }
