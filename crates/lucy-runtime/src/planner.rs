@@ -17,16 +17,11 @@ use super::MAX_CONTEXT_CHARS;
 pub struct SubTask {
     pub(crate) id: String,
     pub(crate) goal: String,
-    #[serde(default)]
-    pub(crate) category: String,
-    #[serde(default)]
-    pub(crate) depends_on: Vec<String>,
-    #[serde(default)]
-    pub(crate) success_condition: Option<String>,
-    #[serde(default)]
-    pub(crate) required_observation: Option<String>,
-    #[serde(default)]
-    pub(crate) constraints: Vec<String>,
+    #[serde(default)] pub(crate) category: String,
+    #[serde(default)] pub(crate) depends_on: Vec<String>,
+    #[serde(default)] pub(crate) success_condition: Option<String>,
+    #[serde(default)] pub(crate) required_observation: Option<String>,
+    #[serde(default)] pub(crate) constraints: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -51,6 +46,39 @@ pub(crate) struct MainDecision {
     #[serde(default)] pub(crate) reason: String,
 }
 
+/// Explicit, bounded context assembly for every model stage. This keeps
+/// strategic instructions separate from live evidence and makes it harder for
+/// stale history or tool output to silently masquerade as current state.
+#[derive(Debug, Default)]
+struct ContextBuilder { sections: Vec<(String, String)> }
+
+impl ContextBuilder {
+    fn section(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        let value = value.into();
+        if !value.trim().is_empty() { self.sections.push((name.into(), value)); }
+        self
+    }
+
+    fn finish(self) -> String {
+        let mut out = String::new();
+        for (name, value) in self.sections {
+            let block = format!("\n## {name}\n{value}\n");
+            if out.len() + block.len() > MAX_CONTEXT_CHARS {
+                let remaining = MAX_CONTEXT_CHARS.saturating_sub(out.len());
+                if remaining > 32 { out.push_str(&block[..remaining.min(block.len())]); }
+                out.push_str("\n[context truncated]");
+                break;
+            }
+            out.push_str(&block);
+        }
+        out
+    }
+}
+
+fn recent_history(history: &[TurnMessage], limit: usize) -> String {
+    history.iter().rev().take(limit).rev().map(|m| format!("{:?}", m)).collect::<Vec<_>>().join("\n")
+}
+
 async fn parse_with_retry<T>(provider:&OpenAIProvider,model:&str,system:&str,user:&str,interrupt:&InterruptSignal)->Result<T>
 where T: for<'de> Deserialize<'de> {
     let v=provider.complete_json(model,system,user,interrupt.clone()).await?;
@@ -62,8 +90,12 @@ where T: for<'de> Deserialize<'de> {
 
 pub(crate) async fn triage_request(provider:&OpenAIProvider,model:&str,prompt:&str,catalog:&HyprFastCatalog,route:&Option<Route>,history:&[TurnMessage],interrupt:&InterruptSignal)->Result<Triage>{
     let route_context=route.as_ref().map(|r|catalog.context_for(r)).unwrap_or_default();
-    let recent_history=history.iter().rev().take(8).map(|m|format!("{:?}",m)).collect::<Vec<_>>().join("\n");
-    let user=format!("New request:\n{prompt}\n\nRecent session context:\n{recent_history}\n\nInitial tool context:\n{route_context}");
+    let user=ContextBuilder::default()
+        .section("CURRENT USER REQUEST", prompt)
+        .section("RECENT SESSION HISTORY (context only)", recent_history(history, 8))
+        .section("CURRENT CAPABILITY ROUTE", route_context)
+        .section("PLANNING RULE", "Plan from the desired outcome. Current observations and tool evidence outrank assumptions and stale history.")
+        .finish();
     validate_triage(parse_with_retry(provider,model,super::prompts::TRIAGE,&user,interrupt).await?)
 }
 
@@ -85,7 +117,18 @@ fn validate_subtask(s:&SubTask)->Result<()> {
 }
 
 pub(crate) async fn decide_next(provider:&OpenAIProvider,model:&str,prompt:&str,remaining:&VecDeque<SubTask>,completed:&HashMap<String,Value>,last_subtask:&SubTask,last_result:&Value,catalog:&HyprFastCatalog,interrupt:&InterruptSignal)->Result<MainDecision>{
-    let user=format!("Task:\n{prompt}\n\nLast subtask:\n{}\nLast result/state:\n{last_result}\n\nRemaining planned subtasks:\n{}\n\nAll completed results/state:\n{}\n\nHyprFast capability summary:\n{}",serde_json::to_string(last_subtask)?,serde_json::to_string(remaining)?,serde_json::to_string(completed)?,serde_json::to_string(&catalog.summary())?);
+    let completed_json=serde_json::to_string(completed)?;
+    let remaining_json=serde_json::to_string(remaining)?;
+    let last_json=serde_json::to_string(last_subtask)?;
+    let user=ContextBuilder::default()
+        .section("ORIGINAL USER GOAL", prompt)
+        .section("LAST SUBTASK", last_json)
+        .section("LAST EXECUTION RESULT / OBSERVATION (highest-priority live evidence)", last_result.to_string())
+        .section("REMAINING PLAN", remaining_json)
+        .section("COMPLETED RESULTS / OBSERVATIONS", completed_json)
+        .section("AVAILABLE CAPABILITIES", serde_json::to_string(&catalog.summary())?)
+        .section("CONTROLLER RULE", "Decide complete only when the user outcome is supported by evidence. Continue only if the existing plan remains valid. Replan when state, information, or assumptions differ.")
+        .finish();
     let mut d:MainDecision=parse_with_retry(provider,model,super::prompts::CONTROLLER,&user,interrupt).await?;
     if let Some(s)=&d.subtask{validate_subtask(s)?;}
     if matches!(d.decision,DecisionKind::Continue)&&d.subtask.is_some(){return Err(anyhow!("continue decision must not include a subtask"));}
@@ -96,13 +139,22 @@ pub(crate) async fn decide_next(provider:&OpenAIProvider,model:&str,prompt:&str,
 
 pub(crate) async fn plan_command(provider:&OpenAIProvider,model:&str,prompt:&str,subtask:&SubTask,schemas:&[Value],context:&str,interrupt:&InterruptSignal)->Result<PlannedCommand>{
     let tools=serde_json::to_string(schemas)?;
-    let user=format!("Original task (context only):\n{prompt}\n\nSubtask:\n{}\n\nCurrent context:\n{context}\n\nAllowed tools and schemas:\n{tools}",serde_json::to_string(subtask)?);
+    let user=ContextBuilder::default()
+        .section("ORIGINAL USER TASK (context only; do not reinterpret)", prompt)
+        .section("EXACT SUBTASK TO COMPILE", serde_json::to_string(subtask)?)
+        .section("CURRENT EXECUTION CONTEXT / OBSERVATIONS", context)
+        .section("ALLOWED TOOLS AND EXACT SCHEMAS", tools)
+        .section("COMPILER RULE", "Use only supplied evidence. If required state is missing and an allowed observation tool exists, choose observation rather than guessing.")
+        .finish();
     parse_with_retry(provider,model,super::prompts::HYPRFAST,&user,interrupt).await
 }
 
 pub(crate) fn build_context(catalog:&HyprFastCatalog,route:&Route,completed:&HashMap<String,Value>,depends_on:&[String])->String{
-    let mut out=catalog.context_for(route);for id in depends_on{if let Some(v)=completed.get(id){out.push_str(&format!("\nDependency {id} result: {v}"));}}
-    if out.len()>MAX_CONTEXT_CHARS{out.truncate(MAX_CONTEXT_CHARS);out.push_str("\n[context truncated]");}out
+    let mut builder=ContextBuilder::default().section("CURRENT ROUTED CAPABILITIES", catalog.context_for(route));
+    for id in depends_on {
+        if let Some(v)=completed.get(id) { builder=builder.section(format!("DEPENDENCY RESULT: {id}"), truncate_json(v.clone()).to_string()); }
+    }
+    builder.finish()
 }
 pub(crate) fn truncate_json(v:Value)->Value{let s=v.to_string();if s.len()<=MAX_CONTEXT_CHARS{return v;}let end=s.char_indices().nth(MAX_CONTEXT_CHARS).map(|(i,_)|i).unwrap_or(s.len());serde_json::json!({"truncated":true,"preview":&s[..end]})}
 pub(crate) fn action_requires_verification(catalog:&HyprFastCatalog,tool:&str,_category:&str,explicit_verify:bool)->bool{if explicit_verify{return true;}catalog.capability_for_mcp_name(tool).map(|c|!c.read_only).unwrap_or(true)}
