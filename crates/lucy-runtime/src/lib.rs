@@ -6,7 +6,7 @@ use lucy_core::{AgentEvent, InterruptSignal, SessionData, SessionId, ToolContext
 use lucy_hyprfast::HyprFastCatalog;
 use lucy_mcp::{load_config, register_server};
 use lucy_tools::{default_registry, ToolRegistry};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
 
@@ -15,7 +15,7 @@ const MAX_MAIN_DECISIONS: usize = 64;
 
 pub struct LucyRuntime { agent: Arc<Agent<OpenAIProvider>>, registry: Arc<ToolRegistry>, provider: Arc<OpenAIProvider>, session: Arc<Mutex<SessionData>>, session_path: PathBuf, interrupt: InterruptSignal, working_dir: PathBuf, hyprfast: Option<HyprFastCatalog>, config: LucyConfig }
 #[derive(Debug, Clone, Deserialize)] struct Decomposition { #[serde(default)] subtasks: Vec<SubTask> }
-#[derive(Debug, Clone, Deserialize)] struct SubTask { id: String, goal: String, #[serde(default)] category: String, #[serde(default)] depends_on: Vec<String> }
+#[derive(Debug, Clone, Deserialize, Serialize)] struct SubTask { id: String, goal: String, #[serde(default)] category: String, #[serde(default)] depends_on: Vec<String> }
 #[derive(Debug, Clone, Deserialize)] struct PlannedCommand { tool: String, arguments: Value, #[serde(default)] verify: Option<String> }
 #[derive(Debug, Clone, Deserialize)] #[serde(rename_all = "snake_case")] enum DecisionKind { Continue, Replan, Complete }
 #[derive(Debug, Clone, Deserialize)] struct MainDecision { decision: DecisionKind, #[serde(default)] subtask: Option<SubTask>, #[serde(default)] reason: String }
@@ -45,7 +45,7 @@ impl LucyRuntime {
   let(tx,rx)=mpsc::unbounded_channel();let session_store=self.session.clone();let path=self.session_path.clone();let max_history=self.config.sessions.max_history;tokio::spawn(async move{let mut source=source;while let Some(event)=source.recv().await{if let AgentEvent::History{message}=&event{let mut session=session_store.lock().await;session.history.push(message.clone());if session.history.len()>max_history{let drop_n=session.history.len()-max_history;session.history.drain(0..drop_n);}session.updated_at=now();let _=session.save_to_file(&path).await;}let _=tx.send(event);}});Ok(rx)
  }
  async fn plan_and_execute(&self,prompt:String,history:Vec<TurnMessage>,route:Option<lucy_hyprfast::Route>)->Result<mpsc::UnboundedReceiver<AgentEvent>>{
-  let(tx,rx)=mpsc::unbounded_channel();let provider=self.provider.clone();let registry=self.registry.clone();let catalog=self.hyprfast.clone().ok_or_else(||anyhow!("HyprFast catalog unavailable"))?;let interrupt=self.interrupt.clone();let working_dir=self.working_dir.clone();let planner_cfg=self.config.planner.clone();let main_model=self.config.models.main.clone();let command_model=self.config.models.hyprfast_command.clone();
+  let(tx,rx)=mpsc::unbounded_channel();let provider=self.provider.clone();let registry=self.registry.clone();let catalog=self.hyprfast.clone().ok_or_else(||anyhow!("HyprFast catalog unavailable"))?;let interrupt=self.interrupt.clone();let working_dir=self.working_dir.clone();let planner_cfg=self.config.planner.clone();let verify_actions=self.config.hyprfast.verify_actions;let main_model=self.config.models.main.clone();let command_model=self.config.models.hyprfast_command.clone();
   tokio::spawn(async move{let run=async{
     let _=tx.send(AgentEvent::History{message:TurnMessage::User(prompt.clone())});
     let _=tx.send(AgentEvent::Status{message:format!("Understanding with {}…",main_model)});
@@ -86,19 +86,19 @@ impl LucyRuntime {
       completed.insert(subtask.id.clone(),state.clone());
       notes.push(subtask.goal.clone());
       let _=tx.send(AgentEvent::History{message:TurnMessage::Tool(ToolResult{call_id,name:command.tool.clone(),output:state.clone(),is_error:false})});
-      if planner_cfg.verify_state && should_verify(&subtask,&command){
-        let _=tx.send(AgentEvent::Status{message:"Checking resulting UI state…".into()});
-      }
+      let must_verify=verify_actions&&planner_cfg.verify_state&&action_requires_verification(&catalog,&command.tool,&subtask.category,command.verify.is_some())&&!subtask.id.starts_with("verify-");
+      if must_verify{let _=tx.send(AgentEvent::Status{message:"State-changing action completed; observing to verify…".into()});}
       decisions+=1;
       let decision=decide_next(&provider,&main_model,&prompt,&queue,&completed,&subtask,&state,&catalog,&interrupt).await?;
+      if must_verify{
+        if let Some(next)=decision.subtask{queue.push_front(next)}
+        queue.push_front(verification_subtask(&catalog,&command.tool,&subtask.goal,&subtask.category,decisions));
+        continue;
+      }
       match decision.decision{
         DecisionKind::Complete=>{let _=tx.send(AgentEvent::Status{message:format!("Completed: {}",decision.reason)});break},
-        DecisionKind::Continue=>{
-          if let Some(next)=decision.subtask{queue.push_front(next)}
-        },
-        DecisionKind::Replan=>{
-          if let Some(next)=decision.subtask{queue.push_front(next)}else if queue.is_empty(){return Err(anyhow!("main model requested replanning but supplied no recovery subtask"))}
-        }
+        DecisionKind::Continue=>{if let Some(next)=decision.subtask{queue.push_front(next)}},
+        DecisionKind::Replan=>{if let Some(next)=decision.subtask{queue.push_front(next)}else if queue.is_empty(){return Err(anyhow!("main model requested replanning but supplied no recovery subtask"))}}
       }
     }
     let text=format!("Completed {} computer-operation step(s).",notes.len());
@@ -123,9 +123,40 @@ async fn decide_next(provider:&OpenAIProvider,model:&str,prompt:&str,remaining:&
  Ok(serde_json::from_value(provider.complete_json(model,system,&user,interrupt.clone()).await?)?)
 }
 
-async fn plan_command(provider:&OpenAIProvider,model:&str,prompt:&str,subtask:&SubTask,schemas:&[Value],context:&str,interrupt:&InterruptSignal)->Result<PlannedCommand>{let system=r#"You are Lucy's fast HyprFast command compiler. This is your ONLY job. You receive ONE already-planned subtask from Lucy's primary model, a small set of allowed HyprFast tools, their exact JSON schemas, and execution context. Select exactly ONE allowed tool and produce exact arguments conforming to its schema. Do not redesign the task, decompose it, invent state, or make strategic decisions. Do not invent fields, tool names, tabs, windows, coordinates, IDs, or other state. If the provided context is insufficient, select an allowed observation tool instead. Return ONLY JSON: {\"tool\":\"exact allowed tool name\",\"arguments\":{},\"verify\":\"optional short verification\"}."#;let tools=serde_json::to_string(schemas)?;let user=format!("Original task (context only):\n{}\n\nSubtask category: {}\nSubtask: {}\nDependencies: {:?}\n\nCurrent HyprFast context:\n{}\n\nAllowed tools and schemas:\n{}",prompt,subtask.category,subtask.goal,subtask.depends_on,context,tools);Ok(serde_json::from_value(provider.complete_json(model,system,&user,interrupt.clone()).await?)?)}
+async fn plan_command(provider:&OpenAIProvider,model:&str,prompt:&str,subtask:&SubTask,schemas:&[Value],context:&str,interrupt:&InterruptSignal)->Result<PlannedCommand>{let system=r#"You are Lucy's fast HyprFast command compiler. This is your ONLY job. You receive ONE already-planned subtask from Lucy's primary model, a small set of allowed HyprFast tools, their exact JSON schemas, and execution context. Select exactly ONE allowed tool and produce exact arguments conforming to its schema. Do not redesign the task, decompose it, invent state, or make strategic decisions. Do not invent fields, tool names, tabs, windows, coordinates, IDs, or other state. If the provided context is insufficient, select an allowed observation tool instead. For verification subtasks, choose a read-only observation tool and do not modify the computer. Return ONLY JSON: {\"tool\":\"exact allowed tool name\",\"arguments\":{},\"verify\":\"optional short verification\"}."#;let tools=serde_json::to_string(schemas)?;let user=format!("Original task (context only):\n{}\n\nSubtask category: {}\nSubtask: {}\nDependencies: {:?}\n\nCurrent HyprFast context:\n{}\n\nAllowed tools and schemas:\n{}",prompt,subtask.category,subtask.goal,subtask.depends_on,context,tools);Ok(serde_json::from_value(provider.complete_json(model,system,&user,interrupt.clone()).await?)?)}
 fn build_context(catalog:&HyprFastCatalog,route:&lucy_hyprfast::Route,completed:&HashMap<String,Value>,depends_on:&[String])->String{let mut out=catalog.context_for(route);for id in depends_on{if let Some(v)=completed.get(id){out.push_str(&format!("\nDependency {} result: {}",id,v));}}if out.len()>MAX_CONTEXT_CHARS{out.truncate(MAX_CONTEXT_CHARS);out.push_str("\n[context truncated]");}out}
 fn truncate_json(v:Value)->Value{let s=v.to_string();if s.len()<=MAX_CONTEXT_CHARS{return v}let end=s.char_indices().nth(MAX_CONTEXT_CHARS).map(|(i,_)|i).unwrap_or(s.len());serde_json::json!({"truncated":true,"preview":&s[..end]})}
-fn should_verify(subtask:&SubTask,command:&PlannedCommand)->bool{command.verify.is_some()||matches!(subtask.category.as_str(),"vision"|"browser"|"excalidraw")}
 fn looks_like_computer_task(text:&str)->bool{let t=text.to_ascii_lowercase();["browser","brave","chrome","firefox","tab","window","workspace","desktop","screen","screenshot","click","type","keyboard","mouse","excalidraw","draw","diagram","clipboard","copy","paste","open app","launch app"].iter().any(|x|t.contains(x))}
 fn now()->u64{std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()}
+
+fn action_requires_verification(catalog:&HyprFastCatalog,tool:&str,category:&str,explicit_verify:bool)->bool{
+ if explicit_verify{return true;}
+ let Some(capability)=catalog.capability_for_mcp_name(tool) else{return true};
+ if capability.read_only{return false;}
+ let _ = category;
+ true
+}
+
+fn verification_category(catalog:&HyprFastCatalog,tool:&str,fallback:&str)->String{
+ catalog.capability_for_mcp_name(tool).map(|capability|match capability.domain{
+  lucy_hyprfast::Domain::Browser|lucy_hyprfast::Domain::Stagehand|lucy_hyprfast::Domain::Hints=>"browser".to_owned(),
+  lucy_hyprfast::Domain::Excalidraw=>"excalidraw".to_owned(),
+  lucy_hyprfast::Domain::Vision=>"vision".to_owned(),
+  lucy_hyprfast::Domain::Desktop|lucy_hyprfast::Domain::Tasks|lucy_hyprfast::Domain::Clipboard|lucy_hyprfast::Domain::System|lucy_hyprfast::Domain::Unknown=>"desktop".to_owned(),
+ }).unwrap_or_else(||fallback.to_owned())
+}
+
+fn verification_subtask(catalog:&HyprFastCatalog,tool:&str,original_goal:&str,fallback_category:&str,id:usize)->SubTask{
+ SubTask{id:format!("verify-{id}"),goal:format!("Observe and verify the current UI state after: {original_goal}. Confirm whether the intended change actually happened; do not make another change."),category:verification_category(catalog,tool,fallback_category),depends_on:Vec::new()}
+}
+
+#[cfg(test)]
+mod verification_tests{
+ use super::*;
+ use lucy_mcp::McpToolDefinition;
+ fn tool(name:&str,description:&str)->McpToolDefinition{McpToolDefinition{name:name.into(),description:Some(description.into()),input_schema:serde_json::json!({"type":"object"})}}
+ #[test]
+ fn state_changing_tool_requires_verification(){let catalog=HyprFastCatalog::from_tools(vec![tool("browser_click","click browser element"),tool("screenshot","capture desktop")]);assert!(action_requires_verification(&catalog,"mcp_hyprfast_browser_click","browser",false));assert!(!action_requires_verification(&catalog,"mcp_hyprfast_screenshot","vision",false));assert!(action_requires_verification(&catalog,"unknown_tool","browser",false));}
+ #[test]
+ fn verification_uses_browser_domain_for_browser_actions(){let catalog=HyprFastCatalog::from_tools(vec![tool("browser_click","click browser element")]);let subtask=verification_subtask(&catalog,"mcp_hyprfast_browser_click","click the button","desktop",7);assert_eq!(subtask.id,"verify-7");assert_eq!(subtask.category,"browser");assert!(subtask.goal.contains("do not make another change"));}
+}
