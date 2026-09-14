@@ -1270,6 +1270,7 @@ dependencies = [
  "lucy-runtime",
  "lucy-stt",
  "ratatui",
+ "serde_json",
  "tokio",
 ]
 
