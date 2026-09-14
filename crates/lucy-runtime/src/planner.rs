@@ -79,6 +79,17 @@ fn recent_history(history: &[TurnMessage], limit: usize) -> String {
     history.iter().rev().take(limit).rev().map(|m| format!("{:?}", m)).collect::<Vec<_>>().join("\n")
 }
 
+fn full_hyprfast_index(catalog: &HyprFastCatalog) -> String {
+    let mut tools: Vec<_> = catalog.tools.values().collect();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut out = String::new();
+    for tool in tools {
+        let caps = tool.capabilities.iter().map(|c| format!("{:?}", c)).collect::<Vec<_>>().join(",");
+        out.push_str(&format!("{} | domain={:?} | op={:?} | caps=[{}] | read_only={} | destructive={} | batchable={} | {}\n", tool.name, tool.domain, tool.operation, caps, tool.read_only, tool.destructive, tool.batchable, tool.description));
+    }
+    out
+}
+
 async fn parse_with_retry<T>(provider:&OpenAIProvider,model:&str,system:&str,user:&str,interrupt:&InterruptSignal)->Result<T>
 where T: for<'de> Deserialize<'de> {
     let v=provider.complete_json(model,system,user,interrupt.clone()).await?;
@@ -150,7 +161,9 @@ pub(crate) async fn plan_command(provider:&OpenAIProvider,model:&str,prompt:&str
 }
 
 pub(crate) fn build_context(catalog:&HyprFastCatalog,route:&Route,completed:&HashMap<String,Value>,depends_on:&[String])->String{
-    let mut builder=ContextBuilder::default().section("CURRENT ROUTED CAPABILITIES", catalog.context_for(route));
+    let mut builder=ContextBuilder::default()
+        .section("FULL HYPRFAST CAPABILITY INDEX (all discovered commands; metadata only)", full_hyprfast_index(catalog))
+        .section("CURRENT ROUTED CAPABILITIES WITH EXECUTABLE SCHEMAS", catalog.context_for(route));
     for id in depends_on {
         if let Some(v)=completed.get(id) { builder=builder.section(format!("DEPENDENCY RESULT: {id}"), truncate_json(v.clone()).to_string()); }
     }
