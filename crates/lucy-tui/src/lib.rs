@@ -65,15 +65,32 @@ fn cleanup(t:&mut Terminal<CrosstermBackend<Stdout>>)->anyhow::Result<()>{
 
 pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
     let config=LucyConfig::load()?;
-    let runtime=Arc::new(LucyRuntime::new().await?);
+    // Try to create runtime but allow degraded mode if OPENAI_API_KEY is missing
+    let (runtime_opt, runtime_error): (Option<Arc<LucyRuntime>>, Option<String>) = match LucyRuntime::new().await {
+        Ok(r) => (Some(Arc::new(r)), None),
+        Err(e) => {
+            let msg = e.to_string();
+            // Keep error for degraded mode; only fail hard for non-config errors that are truly unexpected
+            // Missing API key is the common case where we want to show TUI with instructions
+            if msg.contains("OPENAI_API_KEY") {
+                (None, Some(msg))
+            } else {
+                // For other init errors (e.g. session file corrupt) still propagate
+                // but include actionable hint
+                (None, Some(format!("{msg} (run: lucy config doctor)")))
+            }
+        }
+    };
     enable_raw_mode()?;
     let mut stdout=io::stdout();
     execute!(stdout,EnterAlternateScreen,PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES))?;
     let backend=CrosstermBackend::new(stdout);
     let mut terminal=Terminal::new(backend)?;
     let mut app=App::new(config);
-    if stt.is_none(){
-        app.status="STT unavailable — set GROQ_API_KEY to enable voice".into();
+    if let Some(err) = runtime_error.clone() {
+        app.status = format!("Setup required: {err} — press Ctrl+, for settings or run: lucy config doctor");
+    } else if stt.is_none(){
+        app.status="STT unavailable — set GROQ_API_KEY to enable voice (optional)".into();
     }
     let (voice_tx,mut voice_rx)=mpsc::unbounded_channel::<Result<String,String>>();
     let mut voice_task_running=false;
@@ -108,8 +125,15 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                 Ok(text) if !text.trim().is_empty()=>{
                     let text=text.trim().to_owned();
                     app.commands.push(format!("You › {text}"));
-                    app.status="Executing…".into();
-                    agent_rx=Some(runtime.submit(text).await?);
+                    if let Some(rt)=runtime_opt.as_ref(){
+                        app.status="Executing…".into();
+                        match rt.submit(text).await{
+                            Ok(rx)=>agent_rx=Some(rx),
+                            Err(e)=>app.status=format!("Error: {e}"),
+                        }
+                    } else {
+                        app.status="Setup required: OPENAI_API_KEY missing — export OPENAI_API_KEY=sk-... and restart Lucy".into();
+                    }
                 },
                 Ok(_)=>app.status="I didn't catch anything — try again".into(),
                 Err(e)=>app.status=format!("Voice error: {e}"),
@@ -126,9 +150,28 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                         KeyCode::Left=>settings::change(&mut app.config,app.settings_selected,-1),
                         KeyCode::Right=>settings::change(&mut app.config,app.settings_selected,1),
                         KeyCode::Enter=>{ settings::change(&mut app.config,app.settings_selected,1); },
+                        KeyCode::Backspace=>{
+                            // allow editing text fields in settings
+                            let sel=app.settings_selected;
+                            if matches!(sel,0|1|8|9){
+                                let cur=match sel{0=>app.config.models.main.clone(),1=>app.config.models.hyprfast_command.clone(),8=>app.config.voice.model.clone(),9=>app.config.voice.push_to_talk.clone(),_=>String::new()};
+                                let mut v=cur; v.pop();
+                                settings::edit_text(&mut app.config, sel, &v);
+                            } else {
+                                settings::change(&mut app.config,app.settings_selected,-1);
+                            }
+                        },
+                        KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT|KeyModifiers::SUPER)=>{
+                            let sel=app.settings_selected;
+                            if matches!(sel,0|1|8|9){
+                                let cur=match sel{0=>app.config.models.main.clone(),1=>app.config.models.hyprfast_command.clone(),8=>app.config.voice.model.clone(),9=>app.config.voice.push_to_talk.clone(),_=>String::new()};
+                                let next=format!("{cur}{c}");
+                                settings::edit_text(&mut app.config, sel, &next);
+                            }
+                        },
                         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL)=>{
                             match app.config.save(){
-                                Ok(())=>app.status="Settings saved".into(),
+                                Ok(())=>app.status="Settings saved — restart to apply".into(),
                                 Err(e)=>app.status=format!("Settings error: {e}"),
                             }
                         },
@@ -166,8 +209,15 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                         let text=app.input.trim().to_owned();
                         app.input.clear();
                         app.commands.push(format!("You › {text}"));
-                        app.status="Executing…".into();
-                        agent_rx=Some(runtime.submit(text).await?);
+                        if let Some(rt)=runtime_opt.as_ref(){
+                            app.status="Executing…".into();
+                            match rt.submit(text).await{
+                                Ok(rx)=>agent_rx=Some(rx),
+                                Err(e)=>app.status=format!("Error: {e}"),
+                            }
+                        } else {
+                            app.status="Setup required: OPENAI_API_KEY missing — export OPENAI_API_KEY=sk-... and restart Lucy. Run: lucy config doctor".into();
+                        }
                     },
                     _=>{},
                 }

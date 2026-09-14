@@ -32,7 +32,25 @@ impl LucyConfig {
  fn apply_env(&mut self)->Result<()>{if let Some(v)=env::var_os("OPENAI_MODEL"){self.models.main=v.to_string_lossy().into_owned();}if let Some(v)=env::var_os("LUCY_PLANNER_MODEL"){self.models.hyprfast_command=v.to_string_lossy().into_owned();}if let Some(v)=env::var_os("LUCY_HYPRFAST_COMMAND_MODEL"){self.models.hyprfast_command=v.to_string_lossy().into_owned();}if let Some(v)=env::var_os("OPENAI_BASE_URL"){self.models.base_url=Some(v.to_string_lossy().into_owned());}if let Some(v)=env::var_os("LUCY_STT_MODEL"){self.voice.model=v.to_string_lossy().into_owned();}if let Some(v)=env::var_os("LUCY_STT_LANGUAGE"){self.voice.language=Some(v.to_string_lossy().into_owned());}if let Some(v)=env::var_os("LUCY_HYPRFAST_MAX_CANDIDATES"){self.hyprfast.max_candidates=v.to_string_lossy().parse()?;}Ok(())}
 }
 fn parse_value(raw:&str,old:&toml::Value)->Result<toml::Value>{if matches!(old,toml::Value::String(_)){return Ok(toml::Value::String(raw.to_owned()));}raw.parse::<toml::Value>().map_err(|e| anyhow::anyhow!("invalid value: {e}"))}
-pub fn doctor()->Vec<(&'static str,bool,String)>{match LucyConfig::load(){Ok(c)=>vec![("Config",true,LucyConfig::path().map(|p|p.display().to_string()).unwrap_or_default()),("Main model",true,c.models.main),("HyprFast command model",true,c.models.hyprfast_command),("HyprFast",command_exists(&c.hyprfast.command),c.hyprfast.command)],Err(e)=>vec![("Config",false,e.to_string())]}}
+pub fn doctor()->Vec<(&'static str,bool,String)>{
+    let config_status = match LucyConfig::load(){
+        Ok(c)=>{
+            let hypr_ok = command_exists(&c.hyprfast.command);
+            let openai_ok = std::env::var("OPENAI_API_KEY").map(|v|!v.trim().is_empty()).unwrap_or(false);
+            let groq_ok = std::env::var("GROQ_API_KEY").map(|v|!v.trim().is_empty()).unwrap_or(false);
+            vec![
+                ("Config",true,LucyConfig::path().map(|p|p.display().to_string()).unwrap_or_default()),
+                ("Main model",true,c.models.main),
+                ("HyprFast command model",true,c.models.hyprfast_command),
+                ("HyprFast",hypr_ok,if hypr_ok {c.hyprfast.command.clone()} else {format!("{} (not found - install hyprfast)", c.hyprfast.command)}),
+                ("OPENAI_API_KEY",openai_ok,if openai_ok {"set (required to run Lucy)".into()} else {"missing - export OPENAI_API_KEY=sk-... ".into()}),
+                ("GROQ_API_KEY",groq_ok,if groq_ok {"set (voice enabled)".into()} else {"not set - voice disabled (optional)".into()}),
+            ]
+        },
+        Err(e)=>vec![("Config",false,e.to_string())],
+    };
+    config_status
+}
 fn command_exists(command:&str)->bool{if command.is_empty(){return false;}std::process::Command::new("sh").args(["-c","command -v -- \"$1\" >/dev/null 2>&1","lucy",command]).status().map(|s|s.success()).unwrap_or(false)}
 pub fn config_path()->Result<PathBuf>{LucyConfig::path()}
 pub fn config_exists()->Result<bool>{Ok(Path::new(&LucyConfig::path()?).exists())}
