@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use super::SubTask;
+use super::planner::SubTask;
 
 /// A dependency-safe execution wave. Tasks in the same wave have no dependency
 /// relationship with each other and are safe to consider for concurrent
