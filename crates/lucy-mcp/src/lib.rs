@@ -96,5 +96,5 @@ pub fn load_config() -> Result<Vec<McpServerConfig>> {
     let path = std::env::var("LUCY_MCP_CONFIG").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config/lucy/mcp.toml"));
     if !path.exists() { return Ok(Vec::new()); }
     #[derive(Deserialize)] struct Config { #[serde(default)] servers: Vec<McpServerConfig> }
-    Ok(toml::from_str(&std::fs::read_to_string(path)?)?.servers)
+    Ok(toml::from_str::<Config>(&std::fs::read_to_string(path)?)?.servers)
 }

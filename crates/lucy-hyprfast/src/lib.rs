@@ -27,15 +27,42 @@ impl HyprFastCatalog {
  pub async fn save(&self)->Result<()>{let path=Self::cache_path();if let Some(parent)=path.parent(){tokio::fs::create_dir_all(parent).await?;}tokio::fs::write(path,serde_json::to_vec_pretty(self)?).await?;Ok(())}
  pub async fn load()->Result<Self>{Ok(serde_json::from_slice(&tokio::fs::read(Self::cache_path()).await?)?)}
 
- pub fn route(&self,prompt:&str)->Route {
-   let text=prompt.to_ascii_lowercase();
-   let mut scored:Vec<(i32,&ToolCapability)>=self.tools.values().map(|t|(score(&text,t),t)).collect();
-   scored.sort_by(|a,b|b.0.cmp(&a.0).then_with(||a.1.name.cmp(&b.1.name)));
-   let mut selected=HashSet::new();
-   for (s,t) in scored.iter().take(8) { if *s > 0 { selected.insert(full_name(&t.name)); } }
-   if selected.is_empty() { for t in self.tools.values().filter(|t| !t.destructive).take(4) { selected.insert(full_name(&t.name)); } }
-   Route { candidates:selected.into_iter().collect(), strategy:strategy_for(&text), fast_path:is_fast_path(&text) }
- }
+  pub fn route(&self,prompt:&str)->Route {
+    let text=prompt.to_ascii_lowercase();
+    let mut scored:Vec<(i32,&ToolCapability)>=self.tools.values().map(|t|(score(&text,t),t)).collect();
+    scored.sort_by(|a,b|b.0.cmp(&a.0).then_with(||a.1.name.cmp(&b.1.name)));
+    let mut selected=HashSet::new();
+    for (s,t) in scored.iter().take(8) { if *s > 0 { selected.insert(full_name(&t.name)); } }
+    if selected.is_empty() { for t in self.tools.values().filter(|t| !t.destructive).take(4) { selected.insert(full_name(&t.name)); } }
+    Route { candidates:selected.into_iter().collect(), strategy:strategy_for(&text), fast_path:is_fast_path(&text) }
+  }
+  pub fn route_domain(&self,category:&str,goal:&str)->Route{
+    let domain=match category.to_ascii_lowercase().as_str(){
+      "browser"|"stagehand"|"hints" if !goal.is_empty() => { let _=goal; Domain::Browser },
+      _ => match category.to_ascii_lowercase().as_str(){
+        "browser"=>Domain::Browser, "stagehand"=>Domain::Stagehand, "hints"=>Domain::Hints,
+        "vision"=>Domain::Vision, "clipboard"=>Domain::Clipboard, "excalidraw"=>Domain::Excalidraw,
+        "tasks"=>Domain::Tasks, "desktop"=>Domain::Desktop, "system"=>Domain::System, _=>Domain::Unknown,
+      }
+    };
+    if domain!=Domain::Unknown{
+      let cands:Vec<String>=self.by_domain(domain).iter().map(|t|full_name(&t.name)).collect();
+      if !cands.is_empty(){ return Route{candidates:cands, strategy:strategy_for(&goal.to_ascii_lowercase()), fast_path:false} }
+    }
+    self.route(goal)
+  }
+  pub fn context_for(&self,route:&Route)->String{
+    let mut out=String::new();
+    out.push_str(&format!("HyprFast catalog: {} tools, strategy={}, fast_path={}\n", self.tools.len(), route.strategy, route.fast_path));
+    out.push_str("Domain summary:\n");
+    for (k,v) in self.summary(){ out.push_str(&format!("  {}: {}\n", k, v)); }
+    out.push_str("Candidates:\n");
+    for cand in &route.candidates{
+      if let Some(cap)=self.capability_for_mcp_name(cand){ out.push_str(&format!("  {} [{}] - {}\n", cand, format!("{:?}", cap.domain), cap.description)); }
+      else { out.push_str(&format!("  {} (unknown)\n", cand)); }
+    }
+    out
+  }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

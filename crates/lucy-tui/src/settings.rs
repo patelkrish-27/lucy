@@ -5,7 +5,7 @@ pub const ITEMS: [&str; 11] = ["Main model","HyprFast command model","Planner ma
 
 pub fn draw(frame:&mut Frame<'_>, area:Rect, cfg:&LucyConfig, selected:usize) {
     let popup=Rect{x:area.width/10,y:area.height/10,width:area.width*8/10,height:area.height*8/10};
-    let block=Block::default().title(" Lucy Settings ").borders(Borders::ROUNDED);
+    let block=Block::default().title(" Lucy Settings ").borders(Borders::ALL);
     frame.render_widget(block.clone(),popup);
     let inner=block.inner(popup);
     let cols=Layout::default().direction(Direction::Horizontal).constraints([Constraint::Percentage(45),Constraint::Percentage(55)]).split(inner);
