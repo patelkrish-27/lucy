@@ -106,7 +106,7 @@ pub(crate) async fn triage_request(
         .map(|m| format!("{:?}", m))
         .collect::<Vec<_>>()
         .join("\n");
-    let system=r#"You are Lucy's primary model. You own understanding, strategy, state, dependencies, verification and recovery for EVERY user request. Decide first: if the request needs NO tool use (greeting, question you can answer directly, acknowledgement), return {"mode":"chat","reply":"short warm friendly plain-English reply, two to four short sentences, no markdown"}. Otherwise return {"mode":"act","subtasks":[...]} breaking the request into ordered subtasks, each small enough for exactly ONE command. Write every goal in English as a short imperative phrase: it is shown to the user as live progress text. Categories: browser|desktop|vision|excalidraw|clipboard|tasks|stagehand|hints for on-screen computer work, files|shell for local files, commands and programs. When current UI state matters, START with an observation subtask rather than assuming an app, window, tab, canvas, element, coordinate or focus. Use dependencies to pass observation results to later actions. Do not choose tool names or arguments. Return ONLY JSON."#;
+    let system = super::prompts::TRIAGE;
     let user=format!("New request:\n{}\n\nRecent session context:\n{}\n\nInitial tool context:\n{}",prompt,recent_history,route_context);
     let t: Triage = parse_with_retry(provider, model, system, &user, interrupt).await?;
     validate_triage(t)
@@ -143,7 +143,7 @@ pub(crate) async fn decide_next(
     catalog: &HyprFastCatalog,
     interrupt: &InterruptSignal,
 ) -> Result<MainDecision> {
-    let remaining_json=serde_json::to_string(remaining)?;let completed_json=serde_json::to_string(completed)?;let system=r#"You are Lucy's primary closed-loop controller. Decide what should happen AFTER the last command. You are the only model allowed to reason about overall strategy. Inspect the actual result/state; never assume success merely because a tool returned. If the goal is complete, return complete. If the remaining plan is still valid, return continue with no subtask. If state differs, information is missing, or an action failed, return replan with ONE concrete observation/recovery/action subtask. A replan subtask must be executable by one command (categories: browser|desktop|vision|excalidraw|clipboard|tasks|stagehand|hints for on-screen work, files|shell for local files and programs). Prefer observing before acting when state is uncertain. Do not choose tool names or arguments. Write the reason in English as one short sentence, since it is shown to the user. Return ONLY JSON: {"decision":"continue|replan|complete","subtask":null or {"id":"replan-1","goal":"...","category":"...","depends_on":[]},"reason":"short reason"}."#;
+    let remaining_json=serde_json::to_string(remaining)?;let completed_json=serde_json::to_string(completed)?;let system = super::prompts::CONTROLLER;
     let user=format!("Task:\n{}\n\nLast subtask:\n{}\nLast result/state:\n{}\n\nRemaining planned subtasks:\n{}\n\nAll completed results/state:\n{}\n\nHyprFast capability summary:\n{}",prompt,serde_json::to_string(last_subtask)?,last_result,remaining_json,completed_json,serde_json::to_string(&catalog.summary())?);
     parse_with_retry(provider, model, system, &user, interrupt).await
 }
@@ -159,7 +159,8 @@ pub(crate) async fn plan_command(
     context: &str,
     interrupt: &InterruptSignal,
 ) -> Result<PlannedCommand> {
-    let system=r#"You are Lucy's fast command compiler. This is your ONLY job. You receive ONE already-planned subtask from Lucy's primary model, a small set of allowed tools, their exact JSON schemas, and execution context. Select exactly ONE allowed tool and produce exact arguments conforming to its schema. Do not redesign the task, decompose it, invent state, or make strategic decisions. Do not invent fields, tool names, tabs, windows, coordinates, IDs, or other state. If the provided context is insufficient, select an allowed observation tool instead. For verification subtasks, choose a read-only observation tool and do not modify anything. Return ONLY JSON: {"tool":"exact allowed tool name","arguments":{},"verify":"optional short verification"}."#;let tools=serde_json::to_string(schemas)?;let user=format!("Original task (context only):\n{}\n\nSubtask category: {}\nSubtask: {}\nDependencies: {:?}\n\nCurrent HyprFast context:\n{}\n\nAllowed tools and schemas:\n{}",prompt,subtask.category,subtask.goal,subtask.depends_on,context,tools);parse_with_retry(provider,model,system,&user,interrupt).await
+    let system = super::prompts::HYPRFAST;
+    let tools=serde_json::to_string(schemas)?;let user=format!("Original task (context only):\n{}\n\nSubtask category: {}\nSubtask: {}\nDependencies: {:?}\n\nCurrent HyprFast context:\n{}\n\nAllowed tools and schemas:\n{}",prompt,subtask.category,subtask.goal,subtask.depends_on,context,tools);parse_with_retry(provider,model,system,&user,interrupt).await
 }
 
 pub(crate) fn build_context(
