@@ -58,7 +58,7 @@ fn top_bar(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Span::styled(truncate_one_line(title, 52), Style::default().fg(TEXT_BRIGHT)),
     ])), parts[0]);
     let model = truncate_model_label(&app.model_label);
-    let right = format!("{}  {}  ·  {}  ·  {}", state.0, state.1, if model.is_empty() { "model" } else { model }, format_tokens(app.usage.total_tokens));
+    let right = format!("{}  {}  ·  {}  ·  {}", state.0, state.1, if model.is_empty() { "model" } else { &model }, format_tokens(app.usage.total_tokens));
     frame.render_widget(Paragraph::new(right).style(Style::default().fg(MUTED)).alignment(Alignment::Right), parts[1]);
 }
 
@@ -73,12 +73,12 @@ fn draw_welcome(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     let mascot = vec![
         Line::from(Span::styled("      .-''''-.      ", Style::default().fg(PURPLE))),
         Line::from(Span::styled("    .'  ◡  ◡  '.    ", Style::default().fg(PURPLE))),
-        Line::from(Span::styled("   /     ◡      \", Style::default().fg(PURPLE))),
+        Line::from(Span::styled("   /     ◡      \\    ", Style::default().fg(PURPLE))),
         Line::from(Span::styled("   '._       _.'    ", Style::default().fg(PURPLE))),
         Line::from(Span::styled("      '-----'       ", Style::default().fg(PURPLE))),
         Line::from(""),
         Line::from(Span::styled("Hi, I'm Lucy.", Style::default().fg(TEXT_BRIGHT).add_modifier(Modifier::BOLD))),
-        Line::from(Span::styled("Your personal computer buddy. Tell me the outcome — I'll handle the steps.", Style::default().fg(MUTED))),
+        Line::from(Span::styled("Your personal computer buddy. Tell me the outcome - I'll handle the steps.", Style::default().fg(MUTED))),
     ];
     frame.render_widget(Paragraph::new(Text::from(mascot)).alignment(Alignment::Center), hero[0]);
 
