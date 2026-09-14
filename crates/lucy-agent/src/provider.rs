@@ -10,8 +10,23 @@ use tokio::sync::mpsc;
 pub struct OpenAIProvider { client: Client, api_key: String, model: String, base_url: String }
 impl OpenAIProvider {
     pub fn new(api_key:String,model:String,base_url:Option<String>)->Result<Self>{let client=Client::builder().timeout(Duration::from_secs(120)).build().context("failed to build HTTP client")?;Ok(Self{client,api_key,model,base_url:base_url.unwrap_or_else(||"https://api.openai.com/v1".to_string())})}
-    pub fn from_config(cfg:&LucyConfig)->Result<Self>{let api_key=std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is not set")?;Self::new(api_key,cfg.models.main.clone(),cfg.models.base_url.clone())}
-    pub fn from_env()->Result<Self>{let api_key=std::env::var("OPENAI_API_KEY").context("OPENAI_API_KEY is not set")?;let model=std::env::var("OPENAI_MODEL").unwrap_or_else(|_|"gpt-4o".to_string());Self::new(api_key,model,std::env::var("OPENAI_BASE_URL").ok())}
+    pub fn from_config(cfg:&LucyConfig)->Result<Self>{
+        let api_key = cfg.llm_api_key().context(
+            "LLM API key is not set — open Settings (Ctrl+,) and set 'LLM API Key' and 'LLM Endpoint', or export LUCY_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY, and set LLM_BASE_URL / OPENAI_BASE_URL"
+        )?;
+        Self::new(api_key,cfg.models.main.clone(),cfg.llm_base_url())
+    }
+    pub fn from_env()->Result<Self>{
+        let api_key = std::env::var("LUCY_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+            .or_else(|_| std::env::var("GEMINI_API_KEY"))
+            .or_else(|_| std::env::var("LLM_API_KEY"))
+            .context("LLM API key is not set — set LUCY_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY")?;
+        let model=std::env::var("OPENAI_MODEL").or_else(|_| std::env::var("LUCY_MODEL")).unwrap_or_else(|_|"gpt-4o".to_string());
+        let base_url = std::env::var("OPENAI_BASE_URL").or_else(|_| std::env::var("LLM_BASE_URL")).or_else(|_| std::env::var("LUCY_BASE_URL")).ok();
+        Self::new(api_key,model,base_url)
+    }
     pub async fn complete_json(&self, model:&str, system:&str, user:&str, interrupt:InterruptSignal)->Result<Value>{
         if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
         let payload=json!({"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":user}],"temperature":0,"response_format":{"type":"json_object"}});

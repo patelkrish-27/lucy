@@ -1,5 +1,7 @@
 # Lucy configuration
-# Secrets such as OPENAI_API_KEY and GROQ_API_KEY stay in environment variables.
+# LLM API keys for any brand can be set here or via env vars.
+# Supported envs: LUCY_API_KEY, OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, LLM_API_KEY
+# Endpoint (base_url) makes any OpenAI-compatible provider work.
 
 [general]
 startup_screen = "mascot"
@@ -8,7 +10,14 @@ compact_after_command = true
 [models]
 main = "gpt-4o"
 planner = "gpt-4o-mini"
-# base_url = "https://api.openai.com/v1"
+# Any-brand LLM: set API key and endpoint for your provider
+# api_key = "sk-... or anthropic-key or gemini-key"
+# base_url = "https://api.openai.com/v1"          # OpenAI (default)
+# base_url = "https://api.anthropic.com"           # Anthropic (OpenAI-compatible via proxy)
+# base_url = "https://generativelanguage.googleapis.com/v1beta/openai/" # Gemini OpenAI compat
+# base_url = "https://api.groq.com/openai/v1"      # Groq
+# base_url = "https://api.mistral.ai/v1"           # Mistral
+# base_url = "http://localhost:11434/v1"           # Ollama / local
 
 [planner]
 max_subtasks = 32
@@ -22,6 +31,7 @@ provider = "groq"
 model = "whisper-large-v3-turbo"
 # language = "en"
 push_to_talk = "super+c"
+# api_key = "gsk_..."  # Voice STT key (Groq) — also via GROQ_API_KEY / LUCY_STT_API_KEY env
 
 [hyprfast]
 command = "hyprfast"

@@ -65,18 +65,14 @@ fn cleanup(t:&mut Terminal<CrosstermBackend<Stdout>>)->anyhow::Result<()>{
 
 pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
     let config=LucyConfig::load()?;
-    // Try to create runtime but allow degraded mode if OPENAI_API_KEY is missing
+    // Try to create runtime but allow degraded mode if API key is missing (any brand)
     let (runtime_opt, runtime_error): (Option<Arc<LucyRuntime>>, Option<String>) = match LucyRuntime::new().await {
         Ok(r) => (Some(Arc::new(r)), None),
         Err(e) => {
             let msg = e.to_string();
-            // Keep error for degraded mode; only fail hard for non-config errors that are truly unexpected
-            // Missing API key is the common case where we want to show TUI with instructions
-            if msg.contains("OPENAI_API_KEY") {
+            if msg.contains("API key") || msg.contains("OPENAI_API_KEY") || msg.contains("ANTHROPIC_API_KEY") {
                 (None, Some(msg))
             } else {
-                // For other init errors (e.g. session file corrupt) still propagate
-                // but include actionable hint
                 (None, Some(format!("{msg} (run: lucy config doctor)")))
             }
         }
@@ -132,7 +128,7 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                             Err(e)=>app.status=format!("Error: {e}"),
                         }
                     } else {
-                        app.status="Setup required: OPENAI_API_KEY missing — export OPENAI_API_KEY=sk-... and restart Lucy".into();
+                        app.status="Setup required: LLM API Key missing — open Settings (Ctrl+,) set 'LLM API Key' + 'LLM Endpoint' or export LUCY_API_KEY / OPENAI_API_KEY / ANTHROPIC_API_KEY".into();
                     }
                 },
                 Ok(_)=>app.status="I didn't catch anything — try again".into(),
@@ -151,10 +147,9 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                         KeyCode::Right=>settings::change(&mut app.config,app.settings_selected,1),
                         KeyCode::Enter=>{ settings::change(&mut app.config,app.settings_selected,1); },
                         KeyCode::Backspace=>{
-                            // allow editing text fields in settings
                             let sel=app.settings_selected;
-                            if matches!(sel,0|1|8|9){
-                                let cur=match sel{0=>app.config.models.main.clone(),1=>app.config.models.hyprfast_command.clone(),8=>app.config.voice.model.clone(),9=>app.config.voice.push_to_talk.clone(),_=>String::new()};
+                            if matches!(sel,0|1|2|3|10|11|12){
+                                let cur=settings::raw_value(&app.config, sel);
                                 let mut v=cur; v.pop();
                                 settings::edit_text(&mut app.config, sel, &v);
                             } else {
@@ -163,8 +158,8 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                         },
                         KeyCode::Char(c) if !key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT|KeyModifiers::SUPER)=>{
                             let sel=app.settings_selected;
-                            if matches!(sel,0|1|8|9){
-                                let cur=match sel{0=>app.config.models.main.clone(),1=>app.config.models.hyprfast_command.clone(),8=>app.config.voice.model.clone(),9=>app.config.voice.push_to_talk.clone(),_=>String::new()};
+                            if matches!(sel,0|1|2|3|10|11|12){
+                                let cur=settings::raw_value(&app.config, sel);
                                 let next=format!("{cur}{c}");
                                 settings::edit_text(&mut app.config, sel, &next);
                             }
@@ -216,7 +211,7 @@ pub async fn run_voice(stt:Option<Arc<GroqStt>>)->anyhow::Result<()>{
                                 Err(e)=>app.status=format!("Error: {e}"),
                             }
                         } else {
-                            app.status="Setup required: OPENAI_API_KEY missing — export OPENAI_API_KEY=sk-... and restart Lucy. Run: lucy config doctor".into();
+                            app.status="Setup required: LLM API Key missing — open Settings (Ctrl+,) set 'LLM API Key' + 'LLM Endpoint' or run: lucy config doctor".into();
                         }
                     },
                     _=>{},

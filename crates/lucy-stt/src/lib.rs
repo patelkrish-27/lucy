@@ -11,8 +11,14 @@ const DEFAULT_MODEL: &str = "whisper-large-v3-turbo";
 #[derive(Debug, Clone)]
 pub struct GroqSttConfig { pub api_key: String, pub model: String, pub language: Option<String>, pub prompt: Option<String>, pub temperature: f32, pub timeout: Duration }
 impl GroqSttConfig {
-    pub fn from_config(cfg: &LucyConfig) -> Result<Self> { Ok(Self { api_key: std::env::var("GROQ_API_KEY").context("GROQ_API_KEY is not set")?, model: cfg.voice.model.clone(), language: cfg.voice.language.clone(), prompt: std::env::var("LUCY_STT_PROMPT").ok(), temperature: std::env::var("LUCY_STT_TEMPERATURE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), timeout: Duration::from_secs(60) }) }
-    pub fn from_env() -> Result<Self> { let api_key=std::env::var("GROQ_API_KEY").context("GROQ_API_KEY is not set")?;Ok(Self{api_key,model:std::env::var("LUCY_STT_MODEL").unwrap_or_else(|_|DEFAULT_MODEL.to_owned()),language:std::env::var("LUCY_STT_LANGUAGE").ok(),prompt:std::env::var("LUCY_STT_PROMPT").ok(),temperature:std::env::var("LUCY_STT_TEMPERATURE").ok().and_then(|v|v.parse().ok()).unwrap_or(0.0),timeout:Duration::from_secs(60)}) }
+     pub fn from_config(cfg: &LucyConfig) -> Result<Self> {
+         let api_key = cfg.stt_api_key().context("STT API key is not set — set Voice API Key in Settings or export GROQ_API_KEY / LUCY_STT_API_KEY")?;
+         Ok(Self { api_key, model: cfg.voice.model.clone(), language: cfg.voice.language.clone(), prompt: std::env::var("LUCY_STT_PROMPT").ok(), temperature: std::env::var("LUCY_STT_TEMPERATURE").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0), timeout: Duration::from_secs(60) })
+     }
+     pub fn from_env() -> Result<Self> {
+         let api_key=std::env::var("GROQ_API_KEY").or_else(|_| std::env::var("LUCY_STT_API_KEY")).or_else(|_| std::env::var("STT_API_KEY")).context("STT API key is not set")?;
+         Ok(Self{api_key,model:std::env::var("LUCY_STT_MODEL").unwrap_or_else(|_|DEFAULT_MODEL.to_owned()),language:std::env::var("LUCY_STT_LANGUAGE").ok(),prompt:std::env::var("LUCY_STT_PROMPT").ok(),temperature:std::env::var("LUCY_STT_TEMPERATURE").ok().and_then(|v|v.parse().ok()).unwrap_or(0.0),timeout:Duration::from_secs(60)})
+     }
 }
 #[derive(Debug, Clone)] pub struct GroqStt { client: Client, config: GroqSttConfig }
 #[derive(Debug, Deserialize)] struct GroqErrorResponse { error: Option<GroqError> }

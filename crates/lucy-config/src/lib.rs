@@ -6,16 +6,16 @@ use std::{env, fs, path::{Path, PathBuf}};
 #[serde(default)]
 pub struct LucyConfig { pub general: GeneralConfig, pub models: ModelConfig, pub planner: PlannerConfig, pub voice: VoiceConfig, pub hyprfast: HyprFastConfig, pub appearance: AppearanceConfig, pub sessions: SessionConfig }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct GeneralConfig { pub startup_screen:String, pub compact_after_command:bool }
-#[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct ModelConfig { pub main:String, #[serde(alias="planner")] pub hyprfast_command:String, pub base_url:Option<String> }
+#[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct ModelConfig { pub main:String, #[serde(alias="planner")] pub hyprfast_command:String, pub base_url:Option<String>, #[serde(default, skip_serializing_if="Option::is_none")] pub api_key:Option<String> }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct PlannerConfig { pub max_subtasks:usize, pub max_depth:usize, pub verify_state:bool, pub parallel:bool, pub replan_on_failure:bool }
-#[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct VoiceConfig { pub provider:String, pub model:String, pub language:Option<String>, pub push_to_talk:String }
+#[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct VoiceConfig { pub provider:String, pub model:String, pub language:Option<String>, pub push_to_talk:String, #[serde(default, skip_serializing_if="Option::is_none")] pub api_key:Option<String> }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct HyprFastConfig { pub command:String, pub args:Vec<String>, pub max_candidates:usize, pub batching:bool, pub parallel:bool, pub verify_actions:bool }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct AppearanceConfig { pub theme:String, pub animations:bool, pub activity_verbosity:String }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct SessionConfig { pub file:Option<PathBuf>, pub resume:bool, pub max_history:usize }
 impl Default for GeneralConfig{fn default()->Self{Self{startup_screen:"mascot".into(),compact_after_command:true}}}
-impl Default for ModelConfig{fn default()->Self{Self{main:"gpt-4o".into(),hyprfast_command:"gpt-4o-mini".into(),base_url:None}}}
+impl Default for ModelConfig{fn default()->Self{Self{main:"gpt-4o".into(),hyprfast_command:"gpt-4o-mini".into(),base_url:None,api_key:None}}}
 impl Default for PlannerConfig{fn default()->Self{Self{max_subtasks:32,max_depth:8,verify_state:true,parallel:true,replan_on_failure:true}}}
-impl Default for VoiceConfig{fn default()->Self{Self{provider:"groq".into(),model:"whisper-large-v3-turbo".into(),language:None,push_to_talk:"super+c".into()}}}
+impl Default for VoiceConfig{fn default()->Self{Self{provider:"groq".into(),model:"whisper-large-v3-turbo".into(),language:None,push_to_talk:"super+c".into(),api_key:None}}}
 impl Default for HyprFastConfig{fn default()->Self{Self{command:"hyprfast".into(),args:vec!["mcp".into()],max_candidates:8,batching:true,parallel:true,verify_actions:true}}}
 impl Default for AppearanceConfig{fn default()->Self{Self{theme:"lucy".into(),animations:true,activity_verbosity:"normal".into()}}}
 impl Default for SessionConfig{fn default()->Self{Self{file:None,resume:true,max_history:100}}}
@@ -29,22 +29,80 @@ impl LucyConfig {
  pub fn set(&mut self,key:&str,raw:&str)->Result<()>{let mut value=toml::Value::try_from(&*self)?;let parts:Vec<_>=key.split('.').filter(|p|!p.is_empty()).collect();if parts.is_empty(){bail!("empty config key");}let mut cur=&mut value;for part in &parts[..parts.len()-1]{cur=cur.get_mut(*part).ok_or_else(||anyhow::anyhow!("unknown config key: {key}"))?;}let last=parts[parts.len()-1];let old=cur.get(last).ok_or_else(||anyhow::anyhow!("unknown config key: {key}"))?.clone();cur[last]=parse_value(raw,&old)?;*self=value.try_into()?;self.validate()}
  pub fn reset(&mut self){*self=Self::default();}
  pub fn validate(&self)->Result<()>{if self.planner.max_subtasks==0||self.planner.max_subtasks>256{bail!("planner.max_subtasks must be between 1 and 256");}if self.planner.max_depth==0||self.planner.max_depth>64{bail!("planner.max_depth must be between 1 and 64");}if self.hyprfast.max_candidates==0||self.hyprfast.max_candidates>68{bail!("hyprfast.max_candidates must be between 1 and 68");}if self.sessions.max_history==0{bail!("sessions.max_history must be greater than 0");}Ok(())}
- fn apply_env(&mut self)->Result<()>{if let Some(v)=env::var_os("OPENAI_MODEL"){self.models.main=v.to_string_lossy().into_owned();}if let Some(v)=env::var_os("LUCY_PLANNER_MODEL"){self.models.hyprfast_command=v.to_string_lossy().into_owned();}if let Some(v)=env::var_os("LUCY_HYPRFAST_COMMAND_MODEL"){self.models.hyprfast_command=v.to_string_lossy().into_owned();}if let Some(v)=env::var_os("OPENAI_BASE_URL"){self.models.base_url=Some(v.to_string_lossy().into_owned());}if let Some(v)=env::var_os("LUCY_STT_MODEL"){self.voice.model=v.to_string_lossy().into_owned();}if let Some(v)=env::var_os("LUCY_STT_LANGUAGE"){self.voice.language=Some(v.to_string_lossy().into_owned());}if let Some(v)=env::var_os("LUCY_HYPRFAST_MAX_CANDIDATES"){self.hyprfast.max_candidates=v.to_string_lossy().parse()?;}Ok(())}
+ fn apply_env(&mut self)->Result<()>{
+        if let Some(v)=env::var_os("OPENAI_MODEL"){self.models.main=v.to_string_lossy().into_owned();}
+        if let Some(v)=env::var_os("LUCY_PLANNER_MODEL"){self.models.hyprfast_command=v.to_string_lossy().into_owned();}
+        if let Some(v)=env::var_os("LUCY_HYPRFAST_COMMAND_MODEL"){self.models.hyprfast_command=v.to_string_lossy().into_owned();}
+        if let Some(v)=env::var_os("OPENAI_BASE_URL"){self.models.base_url=Some(v.to_string_lossy().into_owned());}
+        if self.models.base_url.is_none(){
+            if let Some(v)=env::var_os("ANTHROPIC_BASE_URL").or_else(||env::var_os("LLM_BASE_URL")).or_else(||env::var_os("LUCY_BASE_URL")){
+                self.models.base_url=Some(v.to_string_lossy().into_owned());
+            }
+        }
+        // Generic LLM API key: accept any brand via endpoint + key. Priority: config file > env
+        if self.models.api_key.is_none(){
+            for key in ["LUCY_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GEMINI_API_KEY","LLM_API_KEY","MISTRAL_API_KEY","OPENROUTER_API_KEY"]{
+                if let Ok(v)=env::var(key){ if !v.trim().is_empty(){ self.models.api_key=Some(v); break; } }
+            }
+        }
+        if self.voice.api_key.is_none(){
+            for key in ["GROQ_API_KEY","LUCY_STT_API_KEY","STT_API_KEY"]{
+                if let Ok(v)=env::var(key){ if !v.trim().is_empty(){ self.voice.api_key=Some(v); break; } }
+            }
+        }
+        if let Some(v)=env::var_os("LUCY_STT_MODEL"){self.voice.model=v.to_string_lossy().into_owned();}
+        if let Some(v)=env::var_os("LUCY_STT_LANGUAGE"){self.voice.language=Some(v.to_string_lossy().into_owned());}
+        if let Some(v)=env::var_os("LUCY_HYPRFAST_MAX_CANDIDATES"){self.hyprfast.max_candidates=v.to_string_lossy().parse()?;}
+        Ok(())
+    }
+    /// Returns the effective LLM API key from config or env (any brand)
+    pub fn llm_api_key(&self)->Option<String>{
+        self.models.api_key.clone().filter(|v|!v.trim().is_empty()).or_else(||{
+            for key in ["LUCY_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GEMINI_API_KEY","LLM_API_KEY","MISTRAL_API_KEY","OPENROUTER_API_KEY"]{
+                if let Ok(v)=env::var(key){ if !v.trim().is_empty(){ return Some(v); } }
+            }
+            None
+        })
+    }
+    pub fn llm_base_url(&self)->Option<String>{
+        self.models.base_url.clone().or_else(||{
+            env::var("OPENAI_BASE_URL").ok().filter(|v|!v.is_empty()).or_else(||env::var("LLM_BASE_URL").ok()).or_else(||env::var("LUCY_BASE_URL").ok())
+        })
+    }
+    pub fn stt_api_key(&self)->Option<String>{
+        self.voice.api_key.clone().filter(|v|!v.trim().is_empty()).or_else(||{
+            for key in ["GROQ_API_KEY","LUCY_STT_API_KEY","STT_API_KEY"]{
+                if let Ok(v)=env::var(key){ if !v.trim().is_empty(){ return Some(v); } }
+            }
+            None
+        })
+    }
 }
 fn parse_value(raw:&str,old:&toml::Value)->Result<toml::Value>{if matches!(old,toml::Value::String(_)){return Ok(toml::Value::String(raw.to_owned()));}raw.parse::<toml::Value>().map_err(|e| anyhow::anyhow!("invalid value: {e}"))}
 pub fn doctor()->Vec<(&'static str,bool,String)>{
     let config_status = match LucyConfig::load(){
         Ok(c)=>{
             let hypr_ok = command_exists(&c.hyprfast.command);
-            let openai_ok = std::env::var("OPENAI_API_KEY").map(|v|!v.trim().is_empty()).unwrap_or(false);
-            let groq_ok = std::env::var("GROQ_API_KEY").map(|v|!v.trim().is_empty()).unwrap_or(false);
+            let llm_key = c.llm_api_key();
+            let llm_ok = llm_key.is_some();
+            let stt_key = c.stt_api_key();
+            let stt_ok = stt_key.is_some();
+            let endpoint = c.llm_base_url().unwrap_or_else(||"https://api.openai.com/v1 (default)".into());
+            let llm_detail = if llm_ok {
+                let k = llm_key.unwrap();
+                let masked = if k.len()>8 { format!("{}...{} ({} chars)", &k[..4], &k[k.len()-4..], k.len()) } else { "***".into() };
+                format!("set {} — endpoint {}", masked, endpoint)
+            } else {
+                "missing — set via Settings (LLM API Key) or env LUCY_API_KEY/OPENAI_API_KEY/ANTHROPIC_API_KEY and LLM Base URL".into()
+            };
             vec![
                 ("Config",true,LucyConfig::path().map(|p|p.display().to_string()).unwrap_or_default()),
-                ("Main model",true,c.models.main),
-                ("HyprFast command model",true,c.models.hyprfast_command),
+                ("Main model",true,c.models.main.clone()),
+                ("HyprFast command model",true,c.models.hyprfast_command.clone()),
+                ("LLM Endpoint",true,endpoint),
                 ("HyprFast",hypr_ok,if hypr_ok {c.hyprfast.command.clone()} else {format!("{} (not found - install hyprfast)", c.hyprfast.command)}),
-                ("OPENAI_API_KEY",openai_ok,if openai_ok {"set (required to run Lucy)".into()} else {"missing - export OPENAI_API_KEY=sk-... ".into()}),
-                ("GROQ_API_KEY",groq_ok,if groq_ok {"set (voice enabled)".into()} else {"not set - voice disabled (optional)".into()}),
+                ("LLM API Key",llm_ok,llm_detail),
+                ("STT API Key",stt_ok,if stt_ok {"set (voice enabled)".into()} else {"not set — voice disabled (set Voice API Key or GROQ_API_KEY)".into()}),
             ]
         },
         Err(e)=>vec![("Config",false,e.to_string())],
