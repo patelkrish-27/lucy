@@ -10,6 +10,7 @@ tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+lucy-adk = { path = "../lucy-adk" }
 lucy-agent = { path = "../lucy-agent" }
 lucy-core = { path = "../lucy-core" }
 lucy-config = { path = "../lucy-config" }
