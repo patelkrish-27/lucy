@@ -5,6 +5,9 @@
 //! brings in the complementary ADK-Rust capabilities that Lucy did not already
 //! implement, behind an intentionally small facade.
 
+mod execution;
+pub use execution::{to_adk_event, LucyExecution, LUCY_APP_NAME};
+
 use std::{env, path::{Path, PathBuf}, sync::Arc};
 use adk_core::{Content, Part};
 use adk_memory::{MemoryEntry, MemoryService, SearchRequest, SqliteMemoryService};
@@ -64,9 +67,6 @@ impl LucyAdk {
 
     pub async fn remember_fact(&self,fact:&str)->Result<()>{let fact=normalize_memory_text(fact);if !safe_durable_text(&fact){return Ok(());}self.remember_candidates(&[MemoryCandidate{kind:"fact".to_owned(),text:fact}]).await}
 
-    /// Logical forget: records a tombstone so a later semantic search will not
-    /// surface the forgotten memory. This avoids depending on backend-specific
-    /// row mutation APIs while keeping the lifecycle deterministic.
     pub async fn forget_memory(&self,query:&str)->Result<()>{
         let Some(memory)=&self.memory else{return Ok(());};let query=query.trim();if query.is_empty(){return Ok(());}let user_id=local_user_id();let found=self.search_memory(query,DEFAULT_MEMORY_RESULTS).await?;let mut entries=Vec::new();
         for entry in found{let text=content_text(&entry.content);if text.trim().is_empty()||is_tombstone(&text){continue;}entries.push(MemoryEntry{content:Content::new("memory").with_text(format!("[tombstone] {}",text.trim())),author:"lucy-memory".to_owned(),timestamp:Utc::now()});}
