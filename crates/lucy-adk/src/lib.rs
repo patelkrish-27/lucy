@@ -80,12 +80,33 @@ impl LucyAdk {
 fn content_text(content:&Content)->String{content.parts.iter().filter_map(Part::text).collect::<Vec<_>>().join(" ")}
 fn normalize_kind(kind:&str)->String{match kind.trim().to_ascii_lowercase().as_str(){"fact"=>"fact".to_owned(),"preference"=>"preference".to_owned(),"decision"=>"decision".to_owned(),"project"=>"project".to_owned(),"instruction"=>"instruction".to_owned(),_=>String::new()}}
 fn normalize_memory_text(text:&str)->String{text.split_whitespace().collect::<Vec<_>>().join(" ")}
-fn safe_durable_text(text:&str)->bool{if text.is_empty(){return false;}let lower=text.to_ascii_lowercase();!["api key","apikey","password","secret","private key","access token","bearer token","refresh token","seed phrase"].iter().all(|x|!lower.contains(x))}
+
+fn safe_durable_text(text:&str)->bool{
+    if text.trim().is_empty(){return false;}
+    let lower=text.to_ascii_lowercase();
+    ["api key","apikey","password","secret","private key","access token","bearer token","refresh token","seed phrase"]
+        .iter()
+        .all(|needle| !lower.contains(needle))
+}
+
 fn is_tombstone(text:&str)->bool{text.trim_start().to_ascii_lowercase().starts_with("[tombstone]")}
 fn superseded_texts(text:&str)->Vec<String>{let Some(start)=text.find("[supersedes:") else{return Vec::new();};let rest=&text[start+12..];let Some(end)=rest.rfind(']') else{return Vec::new();};rest[..end].split(" | ").map(normalize_memory_text).filter(|s|!s.is_empty()).collect()}
 
-fn curate_interaction(prompt:&str,_response:&str)->Vec<MemoryCandidate>{let text=normalize_memory_text(prompt);if text.is_empty()||text.chars().count()>MAX_MEMORY_FACT_CHARS{return Vec::new();}let lower=text.to_ascii_lowercase();if is_transient(&lower){return Vec::new();}let(kind,explicit)=if contains_any(&lower,&["remember that","remember this","don't forget","do not forget","from now on","always "]){("instruction",true)}else if contains_any(&lower,&["i prefer ","i'd prefer ","i would prefer ","i like ","i love ","i dislike ","i hate ","i don't like ","my preference "]){("preference",true)}else if contains_any(&lower,&["i decided ","we decided ","let's use ","we'll use ","i chose ","i choose ","the plan is "]){("decision",true)}else if contains_any(&lower,&["i'm working on ","i am working on ","my project ","i use ","i'm using ","i am using ","my name is ","call me ","i live in ","i work in ","i study "]){("fact",true)}else{("fact",false)};if !explicit{return Vec::new();}vec![MemoryCandidate{kind:kind.to_owned(),text}]}
-fn is_transient(lower:&str)->bool{contains_any(lower,&["what is ","what's ","who is ","who's ","how do i ","how can i ","can you ","could you ","please open ","open ","close ","run ","search for ","look up ","show me ","tell me ","what time ","weather","thanks","thank you","hello","hi ","hey "])}
+fn curate_interaction(prompt:&str,_response:&str)->Vec<MemoryCandidate>{
+    let text=normalize_memory_text(prompt);
+    if text.is_empty()||text.chars().count()>MAX_MEMORY_FACT_CHARS{return Vec::new();}
+    let lower=text.to_ascii_lowercase();
+    if is_transient(&lower){return Vec::new();}
+    let(kind,explicit)=if contains_any(&lower,&["remember that","remember this","don't forget","do not forget","from now on","always "]){("instruction",true)}else if contains_any(&lower,&["i prefer ","i'd prefer ","i would prefer ","i like ","i love ","i dislike ","i hate ","i don't like ","my preference "]){("preference",true)}else if contains_any(&lower,&["i decided ","we decided ","let's use ","we'll use ","i chose ","i choose ","the plan is "]){("decision",true)}else if contains_any(&lower,&["i'm working on ","i am working on ","my project ","i use ","i'm using ","i am using ","my name is ","call me ","i live in ","i work in ","i study "]){("fact",true)}else{("fact",false)};
+    if !explicit{return Vec::new();}
+    vec![MemoryCandidate{kind:kind.to_owned(),text}]
+}
+
+fn is_transient(lower:&str)->bool{
+    let trimmed=lower.trim_start();
+    contains_any(lower,&["what is ","what's ","who is ","who's ","how do i ","how can i ","can you ","could you ","please open ","open ","close ","search for ","look up ","show me ","tell me ","what time ","weather","thanks","thank you","hello","hi ","hey "])
+        || trimmed.starts_with("run ")
+}
 fn contains_any(text:&str,needles:&[&str])->bool{needles.iter().any(|needle|text.contains(needle))}
 fn local_user_id()->String{env::var("LUCY_USER_ID").or_else(|_|env::var("USER")).unwrap_or_else(|_|"local".to_owned())}
 
