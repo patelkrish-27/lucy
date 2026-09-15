@@ -6,10 +6,10 @@ license.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-cpal.workspace = true
-hound.workspace = true
+futures.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+lucy-adk = { path = "../lucy-adk" }
 lucy-config = { path = "../lucy-config" }
