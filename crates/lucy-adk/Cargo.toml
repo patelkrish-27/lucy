@@ -23,6 +23,7 @@ adk-rust = { version = "2.2.0", default-features = false, features = [
   "audio-stt",
 ] }
 adk-telemetry = "2.2.0"
+lucy-core = { path = "../lucy-core" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
