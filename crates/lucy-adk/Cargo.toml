@@ -8,6 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 chrono = "0.4"
 adk-core = "2.2.0"
+adk-session = { version = "2.2.0", features = ["sqlite"] }
 adk-computer-use = "2.2.0"
 adk-memory = { version = "2.2.0", features = ["sqlite-memory"] }
 adk-audio = { version = "2.2.0", features = ["stt", "desktop-audio", "fx"] }
@@ -28,6 +29,7 @@ serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true
 
 [features]
 full = [
