@@ -6,7 +6,9 @@
 //! implement, behind an intentionally small facade.
 
 mod execution;
+mod session;
 pub use execution::{to_adk_event, LucyExecution, LUCY_APP_NAME};
+pub use session::{LucySessionService, LUCY_SESSION_APP};
 
 use std::{env, path::{Path, PathBuf}, sync::Arc};
 use adk_core::{Content, Part};
