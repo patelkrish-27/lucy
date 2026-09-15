@@ -12,6 +12,7 @@ use adk_memory::{MemoryEntry, MemoryService, SearchRequest, SqliteMemoryService}
 use anyhow::{Context, Result};
 use chrono::Utc;
 
+pub use adk_audio;
 pub use adk_core;
 pub use adk_memory;
 pub use adk_rust;
