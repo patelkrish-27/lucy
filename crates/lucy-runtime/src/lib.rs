@@ -1,5 +1,5 @@
-//! Lucy runtime: builds the agent, tools and session store, then runs every
-//! user command through the hierarchical loop in [`planner`].
+//! Lucy runtime: combines the latency-sensitive Lucy execution engine with
+//! optional ADK-Rust extension services.
 mod execution;
 mod planner;
 mod prompts;
@@ -9,6 +9,7 @@ pub use planner::SubTask;
 pub use sessions::trim_history;
 use std::{collections::{HashMap, HashSet, VecDeque}, path::PathBuf, sync::Arc};
 use anyhow::{anyhow, Result};
+use lucy_adk::{AdkCapability, LucyAdk};
 use lucy_agent::{Agent, OpenAIProvider};
 use lucy_config::LucyConfig;
 use lucy_core::{AgentEvent, ApprovalDecision, ApprovalGate, AssistantTurn, ExecutionMode, InterruptSignal, SessionData, SessionId, SessionStore, TokenUsage, ToolContext, ToolResult, TurnMessage};
@@ -24,7 +25,7 @@ const MAX_ACTIONS: usize = 64;
 const MAX_MAIN_DECISIONS: usize = 12;
 const MAX_REPLANS: usize = 8;
 
-pub struct LucyRuntime { agent:Arc<Agent<OpenAIProvider>>, registry:Arc<ToolRegistry>, provider:Arc<OpenAIProvider>, session:Arc<Mutex<SessionData>>, store:SessionStore, #[allow(dead_code)] legacy_path:PathBuf, interrupt:InterruptSignal, working_dir:PathBuf, hyprfast:Option<HyprFastCatalog>, config:LucyConfig, approvals:ApprovalGate }
+pub struct LucyRuntime { agent:Arc<Agent<OpenAIProvider>>, registry:Arc<ToolRegistry>, provider:Arc<OpenAIProvider>, session:Arc<Mutex<SessionData>>, store:SessionStore, #[allow(dead_code)] legacy_path:PathBuf, interrupt:InterruptSignal, working_dir:PathBuf, hyprfast:Option<HyprFastCatalog>, config:LucyConfig, approvals:ApprovalGate, adk:Arc<LucyAdk> }
 impl LucyRuntime {
     pub async fn new()->Result<Self>{
         let config=LucyConfig::load()?;let provider=Arc::new(OpenAIProvider::from_config(&config)?);let mut registry=default_registry();
@@ -33,19 +34,22 @@ impl LucyRuntime {
         for server in load_config()?{if server.name.eq_ignore_ascii_case("hyprfast"){continue}if let Err(e)=register_server(&mut registry,server.clone()).await{tracing::warn!(server=%server.name,error=%e,"MCP server unavailable")}}
         if hyprfast.is_some(){if let Err(e)=register_server(&mut registry,hf_cfg).await{tracing::warn!(error=%e,"failed to register HyprFast MCP tools")}}
         let legacy_path=config.sessions.file.clone().or_else(||std::env::var("LUCY_SESSION_FILE").ok().map(PathBuf::from)).unwrap_or_else(||PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".local/state/lucy/session.json"));
-        let store_dir=config.sessions.dir.clone().or_else(||std::env::var("LUCY_SESSIONS_DIR").ok().map(PathBuf::from)).unwrap_or_else(SessionStore::default_dir);let store=SessionStore::new(store_dir);let _=store.migrate_legacy_file(&legacy_path).await;
+        let store_dir=config.sessions.dir.clone().or_else(||std::env::var("LUCY_SESSIONS_DIR").ok().map(PathBuf::from)).unwrap_or_else(SessionStore::default_dir);let adk=Arc::new(LucyAdk::open(&store_dir).await);let store=SessionStore::new(store_dir);let _=store.migrate_legacy_file(&legacy_path).await;
         let session=if config.sessions.resume{match store.list().await{Ok(list)if !list.is_empty()=>match store.load(&list[0].id).await{Ok(s)=>s,Err(_)=>store.create(None).await?},_=>store.create(None).await?}}else{store.create(None).await?};
         let registry=Arc::new(registry);let agent=Arc::new(Agent::new(provider.clone(),registry.clone()));let(approval_tx,_approval_rx)=mpsc::unbounded_channel();let approvals=ApprovalGate::new(approval_tx);if let Ok(mut m)=approvals.mode.write(){*m=config.approvals.mode.clone()}
-        Ok(Self{agent,registry,provider,session:Arc::new(Mutex::new(session)),store,legacy_path,interrupt:InterruptSignal::new(),working_dir:std::env::current_dir()?,hyprfast,config,approvals})
+        Ok(Self{agent,registry,provider,session:Arc::new(Mutex::new(session)),store,legacy_path,interrupt:InterruptSignal::new(),working_dir:std::env::current_dir()?,hyprfast,config,approvals,adk})
     }
     pub fn interrupt(&self){self.interrupt.fire()} pub fn hyprfast_catalog(&self)->Option<&HyprFastCatalog>{self.hyprfast.as_ref()} pub fn route_hyprfast(&self,prompt:&str)->Option<lucy_hyprfast::Route>{self.hyprfast.as_ref().map(|c|c.route(prompt))} pub fn config(&self)->&LucyConfig{&self.config} pub fn approval_state(&self)->ApprovalGate{self.approvals.clone()} pub fn resolve_approval(&self,call_id:&str,d:ApprovalDecision)->bool{self.approvals.resolve(call_id,d)} pub fn usage(&self)->TokenUsage{self.provider.usage()}
+    pub fn adk_capabilities(&self)->&'static [AdkCapability]{self.adk.capabilities()} pub fn adk_memory_enabled(&self)->bool{self.adk.memory_enabled()}
+    pub async fn search_memory(&self,query:&str,limit:usize)->Result<Vec<lucy_adk::adk_memory::MemoryEntry>>{self.adk.search_memory(query,limit).await}
     pub fn set_model(&self,model:&str)->anyhow::Result<String>{let name=model.trim().to_owned();if name.is_empty(){return Err(anyhow!("model name must not be empty"))}let mut cfg=LucyConfig::load()?;cfg.models.main=name.clone();cfg.save()?;self.provider.set_model(name.clone());Ok(name)}
     pub async fn submit(&self,prompt:String)->Result<mpsc::UnboundedReceiver<AgentEvent>>{
         self.interrupt.reset();if self.session.lock().await.history.len()>self.config.sessions.max_history{let _=self.compact().await;};
+        let memory_prompt=prompt.clone();
         let session_snapshot={let mut s=self.session.lock().await;if s.title.trim().is_empty()||s.title=="untitled"{s.title=SessionData::autotitle_from(&prompt)}s.touch();let _=self.store.save(&s).await;s.clone()};let route=self.route_hyprfast(&prompt);
         let source=if self.hyprfast.is_some(){match self.plan_and_execute(prompt.clone(),session_snapshot.history.clone(),route.clone()).await{Ok(rx)=>rx,Err(e)=>{tracing::warn!(error=%e,"hierarchical planner unavailable; falling back to general agent");self.agent.execute_with_history_filtered(prompt,session_snapshot.history,Some(self.working_dir.clone()),self.interrupt.clone(),route.map(|r|r.candidates.into_iter().collect()).unwrap_or_default()).await?}}}else{self.agent.execute_with_history_filtered(prompt,session_snapshot.history,Some(self.working_dir.clone()),self.interrupt.clone(),route.map(|r|r.candidates.into_iter().collect()).unwrap_or_default()).await?};
-        let(tx,rx)=mpsc::unbounded_channel();let session_store=self.session.clone();let store=self.store.clone();let max_history=self.config.sessions.max_history;let owner_id=session_snapshot.session_id.clone();
-        tokio::spawn(async move{let mut source=source;while let Some(event)=source.recv().await{if let AgentEvent::History{message}=&event{let current_id=session_store.lock().await.session_id.clone();if current_id==owner_id{let mut session=session_store.lock().await;session.history.push(message.clone());trim_history(&mut session.history,max_history);session.updated_at=now();let _=store.save(&session).await;}else if let Ok(mut owner)=store.load(&owner_id).await{owner.history.push(message.clone());trim_history(&mut owner.history,max_history);owner.updated_at=now();let _=store.save(&owner).await;}}let _=tx.send(event);}});Ok(rx)
+        let(tx,rx)=mpsc::unbounded_channel();let session_store=self.session.clone();let store=self.store.clone();let max_history=self.config.sessions.max_history;let owner_id=session_snapshot.session_id.clone();let adk=self.adk.clone();
+        tokio::spawn(async move{let mut source=source;let mut last_assistant_text=None::<String>;while let Some(event)=source.recv().await{if let AgentEvent::History{message}=&event{if let TurnMessage::Assistant(turn)=message{if let Some(text)=turn.text.clone(){if !text.trim().is_empty(){last_assistant_text=Some(text);}}}let current_id=session_store.lock().await.session_id.clone();if current_id==owner_id{let mut session=session_store.lock().await;session.history.push(message.clone());trim_history(&mut session.history,max_history);session.updated_at=now();let _=store.save(&session).await;}else if let Ok(mut owner)=store.load(&owner_id).await{owner.history.push(message.clone());trim_history(&mut owner.history,max_history);owner.updated_at=now();let _=store.save(&owner).await;}}let _=tx.send(event);}if let Some(text)=last_assistant_text{let adk=adk.clone();let prompt=memory_prompt.clone();let sid=owner_id.clone();tokio::spawn(async move{if let Err(error)=adk.remember_interaction(&sid,&prompt,&text).await{tracing::debug!(error=%error,"ADK memory write skipped");}});}});Ok(rx)
     }
     async fn plan_and_execute(&self,prompt:String,history:Vec<TurnMessage>,route:Option<lucy_hyprfast::Route>)->Result<mpsc::UnboundedReceiver<AgentEvent>>{
         let(tx,rx)=mpsc::unbounded_channel();let provider=self.provider.clone();let registry=self.registry.clone();let catalog=self.hyprfast.clone().ok_or_else(||anyhow!("HyprFast catalog unavailable"))?;let interrupt=self.interrupt.clone();let working_dir=self.working_dir.clone();let planner_cfg=self.config.planner.clone();let verify_actions=self.config.hyprfast.verify_actions;let main_model=self.provider.model();let command_model=self.config.models.hyprfast_command.clone();let approvals=self.approvals.clone();
