@@ -1,8 +1,8 @@
-use crate::{SessionId, TurnMessage};
-use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::fs;
+use anyhow::{Context, Result};
+use crate::{SessionId, TurnMessage};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionData {
@@ -70,11 +70,8 @@ impl SessionData {
     }
 
     pub async fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let content = fs::read_to_string(path.as_ref())
-            .await
-            .context("failed to read session file")?;
-        let mut session: SessionData =
-            serde_json::from_str(&content).context("failed to parse session data")?;
+        let content = fs::read_to_string(path.as_ref()).await.context("failed to read session file")?;
+        let mut session: SessionData = serde_json::from_str(&content).context("failed to parse session data")?;
         // Back-compat: old files lack `title`.
         if session.title.trim().is_empty() {
             session.title = session.preview();
@@ -87,15 +84,10 @@ impl SessionData {
 
     pub async fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
         if let Some(parent) = path.as_ref().parent() {
-            fs::create_dir_all(parent)
-                .await
-                .context("failed to create session directory")?;
+            fs::create_dir_all(parent).await.context("failed to create session directory")?;
         }
-        let content =
-            serde_json::to_string_pretty(self).context("failed to serialize session data")?;
-        fs::write(path, content)
-            .await
-            .context("failed to write session file")?;
+        let content = serde_json::to_string_pretty(self).context("failed to serialize session data")?;
+        fs::write(path, content).await.context("failed to write session file")?;
         Ok(())
     }
 }
@@ -152,17 +144,13 @@ impl SessionStore {
     }
 
     pub async fn ensure_dir(&self) -> Result<()> {
-        fs::create_dir_all(&self.dir)
-            .await
-            .context("failed to create sessions dir")?;
+        fs::create_dir_all(&self.dir).await.context("failed to create sessions dir")?;
         Ok(())
     }
 
     pub async fn save(&self, session: &SessionData) -> Result<()> {
         self.ensure_dir().await?;
-        session
-            .save_to_file(self.session_path(&session.session_id))
-            .await
+        session.save_to_file(self.session_path(&session.session_id)).await
     }
 
     pub async fn load(&self, id: &SessionId) -> Result<SessionData> {
@@ -172,9 +160,7 @@ impl SessionStore {
     pub async fn delete(&self, id: &SessionId) -> Result<()> {
         let p = self.session_path(id);
         if p.exists() {
-            fs::remove_file(&p)
-                .await
-                .context("failed to delete session")?;
+            fs::remove_file(&p).await.context("failed to delete session")?;
         }
         Ok(())
     }
@@ -183,14 +169,8 @@ impl SessionStore {
     pub async fn list(&self) -> Result<Vec<SessionMeta>> {
         self.ensure_dir().await?;
         let mut out = Vec::new();
-        let mut entries = fs::read_dir(&self.dir)
-            .await
-            .context("failed to read sessions dir")?;
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .context("failed to read session entry")?
-        {
+        let mut entries = fs::read_dir(&self.dir).await.context("failed to read sessions dir")?;
+        while let Some(entry) = entries.next_entry().await.context("failed to read session entry")? {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -205,11 +185,7 @@ impl SessionStore {
                 }
             }
         }
-        out.sort_by(|a, b| {
-            b.updated_at
-                .cmp(&a.updated_at)
-                .then(b.created_at.cmp(&a.created_at))
-        });
+        out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(b.created_at.cmp(&a.created_at)));
         Ok(out)
     }
 
@@ -225,11 +201,7 @@ impl SessionStore {
     pub async fn fork(&self, src: &SessionData, title_suffix: &str) -> Result<SessionData> {
         let mut forked = SessionData::new(SessionId::default());
         forked.history = src.history.clone();
-        let base = if src.title.trim().is_empty() {
-            "untitled".to_owned()
-        } else {
-            src.title.clone()
-        };
+        let base = if src.title.trim().is_empty() { "untitled".to_owned() } else { src.title.clone() };
         forked.title = format!("{base} {title_suffix}").trim().to_owned();
         self.save(&forked).await?;
         Ok(forked)
@@ -237,10 +209,7 @@ impl SessionStore {
 
     /// Migrate a legacy single `session.json` into the store (opencode parity:
     /// never lose the previous conversation on upgrade).
-    pub async fn migrate_legacy_file<P: AsRef<Path>>(
-        &self,
-        legacy: P,
-    ) -> Result<Option<SessionData>> {
+    pub async fn migrate_legacy_file<P: AsRef<Path>>(&self, legacy: P) -> Result<Option<SessionData>> {
         let legacy = legacy.as_ref();
         if !legacy.exists() {
             return Ok(None);
@@ -277,9 +246,7 @@ mod tests {
 
     #[test]
     fn autotitle_truncates() {
-        let t = SessionData::autotitle_from(
-            "  hello   world  this is a very long message that should be truncated at some point yes",
-        );
+        let t = SessionData::autotitle_from("  hello   world  this is a very long message that should be truncated at some point yes");
         assert!(t.chars().count() <= 49, "got {t:?}");
         assert!(t.starts_with("hello world"));
     }

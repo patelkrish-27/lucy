@@ -26,11 +26,6 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/history", "show input history"),
     ("/status", "show session + runtime status"),
     ("/model", "show current model"),
-    ("/auto", "auto-approve permissions — /auto [on|off]"),
-    (
-        "/approvals",
-        "permission mode — /approvals [never|write|always]",
-    ),
     ("/export", "export session — /export <file.json>"),
     ("/help", "show help (F1)"),
     ("/settings", "open settings (Ctrl+,)"),
@@ -97,7 +92,11 @@ pub(crate) fn format_tool_start(name: &str, input: &serde_json::Value) -> String
 }
 
 /// Human-readable one-line summary of a finished tool call (`✔` / `✖`).
-pub(crate) fn format_tool_finish(name: &str, output: &serde_json::Value, is_error: bool) -> String {
+pub(crate) fn format_tool_finish(
+    name: &str,
+    output: &serde_json::Value,
+    is_error: bool,
+) -> String {
     if is_error {
         let err_msg = output
             .get("error")
@@ -194,19 +193,13 @@ pub(crate) async fn handle_slash(rt: &LucyRuntime, app: &mut App, raw: &str) -> 
     let arg = parts.next().unwrap_or("").trim().to_owned();
     match cmd.as_str() {
         "/new" => {
-            match rt
-                .new_session(if arg.is_empty() { None } else { Some(arg) })
-                .await
-            {
+            match rt.new_session(if arg.is_empty() { None } else { Some(arg) }).await {
                 Ok(meta) => {
                     app.session_title = meta.title.clone();
                     app.session_id_short = short_id(&meta.id.0.to_string());
                     app.session_count = meta.message_count;
                     app.load_turns(&rt.history().await);
-                    app.push_msg(ChatMsg::system(format!(
-                        "New session: {} ({})",
-                        app.session_title, app.session_id_short
-                    )));
+                    app.push_msg(ChatMsg::system(format!("New session: {} ({})", app.session_title, app.session_id_short)));
                     app.pin();
                     app.status = "Ready — new session".into();
                 }
@@ -217,8 +210,7 @@ pub(crate) async fn handle_slash(rt: &LucyRuntime, app: &mut App, raw: &str) -> 
         "/sessions" => {
             refresh_sessions(rt, app).await;
             app.show_sessions = true;
-            app.status =
-                "Sessions — ↑/↓ select · Enter switch · d delete · n new · Esc close".into();
+            app.status = "Sessions — ↑/↓ select · Enter switch · d delete · n new · Esc close".into();
             true
         }
         "/switch" => {
@@ -229,23 +221,20 @@ pub(crate) async fn handle_slash(rt: &LucyRuntime, app: &mut App, raw: &str) -> 
                 return true;
             }
             match resolve_session_arg(&app.sessions, &arg) {
-                Some(meta) => match rt.switch_session(&meta.id).await {
-                    Ok(switched) => {
-                        app.session_title = switched.title.clone();
-                        app.session_id_short = short_id(&switched.id.0.to_string());
-                        app.session_count = switched.message_count;
-                        app.load_turns(&rt.history().await);
-                        app.push_msg(ChatMsg::system(format!(
-                            "Switched to: {}",
-                            app.session_title
-                        )));
-                        app.status = "Ready".into();
+                Some(meta) => {
+                    match rt.switch_session(&meta.id).await {
+                        Ok(switched) => {
+                            app.session_title = switched.title.clone();
+                            app.session_id_short = short_id(&switched.id.0.to_string());
+                            app.session_count = switched.message_count;
+                            app.load_turns(&rt.history().await);
+                            app.push_msg(ChatMsg::system(format!("Switched to: {}", app.session_title)));
+                            app.status = "Ready".into();
+                        }
+                        Err(e) => app.push_msg(ChatMsg::system(format!("Switch failed: {e}"))),
                     }
-                    Err(e) => app.push_msg(ChatMsg::system(format!("Switch failed: {e}"))),
-                },
-                None => app.push_msg(ChatMsg::system(format!(
-                    "No session matches '{arg}'. Use /sessions to list."
-                ))),
+                }
+                None => app.push_msg(ChatMsg::system(format!("No session matches '{arg}'. Use /sessions to list."))),
             }
             true
         }
@@ -266,15 +255,10 @@ pub(crate) async fn handle_slash(rt: &LucyRuntime, app: &mut App, raw: &str) -> 
         "/delete" => {
             refresh_sessions(rt, app).await;
             let target = if arg.is_empty() {
-                app.sessions
-                    .first()
-                    .cloned()
-                    .filter(|m| {
-                        // default: current session when no arg
-                        format!("{}", m.id.0).starts_with(&app.session_id_short)
-                            || m.title == app.session_title
-                    })
-                    .or_else(|| app.sessions.first().cloned())
+                app.sessions.first().cloned().filter(|m| {
+                    // default: current session when no arg
+                    format!("{}", m.id.0).starts_with(&app.session_id_short) || m.title == app.session_title
+                }).or_else(|| app.sessions.first().cloned())
             } else {
                 resolve_session_arg(&app.sessions, &arg)
             };
@@ -348,88 +332,19 @@ pub(crate) async fn handle_slash(rt: &LucyRuntime, app: &mut App, raw: &str) -> 
         "/status" => {
             let meta = rt.current_meta().await;
             let usage_note = "tokens tracked per model call";
-            let mode = rt.approval_mode();
-            let mode_note = match mode.as_str() {
-                "never" => "auto (no permission popups — /auto off to re-enable)",
-                "always" => "paranoid (asks for every tool)",
-                _ => "default (asks for state-changing tools — /auto on for hands-free)",
-            };
             app.push_msg(ChatMsg::system(format!(
-                "Session: {} ({})\nMessages: {} · Model: {} · Dir: {}\nPermissions: {} ({mode_note})\n{usage_note}",
+                "Session: {} ({})\nMessages: {} · Model: {} · Dir: {}\n{usage_note}",
                 meta.title,
                 short_id(&meta.id.0.to_string()),
                 meta.message_count,
                 app.model_label,
                 rt.sessions_dir().display(),
-                mode,
             )));
-            true
-        }
-        "/auto" => {
-            // Hands-free switch the user asked for: `/auto` toggles,
-            // `/auto on` enables (no permission popups), `/auto off` disables.
-            let want = match arg.trim().to_ascii_lowercase().as_str() {
-                "" => None,
-                "on" | "enable" | "enabled" | "1" | "true" | "yes" | "y" => Some(true),
-                "off" | "disable" | "disabled" | "0" | "false" | "no" | "n" => Some(false),
-                other => {
-                    app.push_msg(ChatMsg::system(format!(
-                        "Usage: /auto [on|off] — unknown arg '{other}'"
-                    )));
-                    return true;
-                }
-            };
-            let target = want.unwrap_or_else(|| !rt.is_auto());
-            match rt.set_auto_approve(target) {
-                Ok(mode) => {
-                    app.config.approvals.mode = mode.clone();
-                    if target {
-                        app.push_msg(ChatMsg::lucy("Lucy › Auto-approve ON — I will run every step without asking (browser, shell, files). Use /auto off to re-enable permission popups.".into()));
-                        app.status = "Auto-approve: ON (never ask)".into();
-                    } else {
-                        app.push_msg(ChatMsg::lucy(format!("Lucy › Auto-approve OFF — permission mode back to '{mode}' (I will ask before state-changing tools).")));
-                        app.status = format!("Auto-approve: OFF ({mode})");
-                    }
-                }
-                Err(e) => app.push_msg(ChatMsg::system(format!("Auto switch failed: {e}"))),
-            }
-            true
-        }
-        "/approvals" | "/permissions" | "/permission" => {
-            // Full permission-mode control: show or set never|write|always.
-            if arg.is_empty() {
-                let mode = rt.approval_mode();
-                app.push_msg(ChatMsg::lucy(format!(
-                    "Lucy › Permissions: {mode}\n\n- never (auto) — run everything, never ask — /auto on\n- write (default) — ask before state-changing tools\n- always — ask before every tool\n\nSet with /approvals <never|write|always> or /auto [on|off]"
-                )));
-                return true;
-            }
-            match rt.set_approval_mode(&arg) {
-                Ok(mode) => {
-                    app.config.approvals.mode = mode.clone();
-                    app.push_msg(ChatMsg::lucy(format!(
-                        "Lucy › Permissions set to '{mode}'{}",
-                        if mode == "never" {
-                            " — auto-approve ON, I will not ask again"
-                        } else {
-                            ""
-                        }
-                    )));
-                    app.status = format!("Permissions: {mode}");
-                }
-                Err(e) => app.push_msg(ChatMsg::system(format!(
-                    "{e} — try /approvals never|write|always"
-                ))),
-            }
             true
         }
         "/model" => {
             if arg.is_empty() {
-                let cur = if app.model_label.is_empty() {
-                    "(unknown)".to_owned()
-                } else {
-                    app.model_label.clone()
-                };
+                let cur = if app.model_label.is_empty() { "(unknown)".to_owned() } else { app.model_label.clone() };
                 app.push_msg(ChatMsg::lucy(format!("Lucy › Current model: {cur}")));
             } else {
                 match rt.set_model(&arg) {
@@ -473,7 +388,7 @@ pub(crate) async fn handle_slash(rt: &LucyRuntime, app: &mut App, raw: &str) -> 
         }
         "/help" | "/?" => {
             app.push_msg(ChatMsg::lucy(
-                "Lucy › Available commands\n\n- /help — show this help\n- /clear — clear session history\n- /model [name] — show or set model\n- /auto [on|off] — auto-approve permissions (hands-free computer control)\n- /approvals [never|write|always] — permission mode\n- /compact — trim history into a summary\n- /usage — show token usage\n- /doctor — run config checks\n\nKeys\n\n- F2 hold-to-talk voice\n- PgUp/PgDn scroll\n- Esc cancel/quit".to_owned(),
+                "Lucy › Available commands\n\n- /help — show this help\n- /clear — clear session history\n- /model [name] — show or set model\n- /compact — trim history into a summary\n- /usage — show token usage\n- /doctor — run config checks\n\nKeys\n\n- F2 hold-to-talk voice\n- PgUp/PgDn scroll\n- Esc cancel/quit".to_owned(),
             ));
             true
         }
@@ -501,7 +416,7 @@ fn handle_slash_offline(app: &mut App, raw: &str) {
     match cmd.as_str() {
         "/help" | "/?" => {
             app.push_msg(ChatMsg::lucy(
-                "Lucy › Available commands\n\n- /help — show this help\n- /clear — clear session history\n- /model [name] — show or set model\n- /auto [on|off] — auto-approve permissions\n- /approvals [never|write|always] — permission mode\n- /compact — trim history into a summary\n- /usage — show token usage\n- /doctor — run config checks\n\nKeys\n\n- F2 hold-to-talk voice\n- PgUp/PgDn scroll\n- Esc cancel/quit".to_owned(),
+                "Lucy › Available commands\n\n- /help — show this help\n- /clear — clear session history\n- /model [name] — show or set model\n- /compact — trim history into a summary\n- /usage — show token usage\n- /doctor — run config checks\n\nKeys\n\n- F2 hold-to-talk voice\n- PgUp/PgDn scroll\n- Esc cancel/quit".to_owned(),
             ));
         }
         "/clear" => {
@@ -515,11 +430,7 @@ fn handle_slash_offline(app: &mut App, raw: &str) {
         }
         "/model" => {
             if arg.is_empty() {
-                let cur = if app.model_label.is_empty() {
-                    "(unknown)".to_owned()
-                } else {
-                    app.model_label.clone()
-                };
+                let cur = if app.model_label.is_empty() { "(unknown)".to_owned() } else { app.model_label.clone() };
                 app.push_msg(ChatMsg::lucy(format!("Lucy › Current model: {cur}")));
             } else {
                 app.status = "Setup required before changing model.".into();
@@ -528,13 +439,8 @@ fn handle_slash_offline(app: &mut App, raw: &str) {
         "/compact" => {
             app.status = "Setup required before compact works.".into();
         }
-        "/auto" | "/approvals" | "/permissions" | "/permission" => {
-            app.status = "Setup required before changing permissions.".into();
-        }
         "/usage" => {
-            app.push_msg(ChatMsg::lucy(
-                "Lucy › Usage — prompt: 0 tokens, completion: 0 tokens, total: 0 tokens".to_owned(),
-            ));
+            app.push_msg(ChatMsg::lucy("Lucy › Usage — prompt: 0 tokens, completion: 0 tokens, total: 0 tokens".to_owned()));
         }
         "/doctor" => {
             let checks = lucy_config::doctor();
