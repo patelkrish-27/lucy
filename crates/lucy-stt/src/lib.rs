@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Context, Result};
 use futures::{stream, StreamExt};
 use lucy_adk::adk_audio::{
-    encode, AudioError, AudioFormat, AudioFrame, AudioCapture, CaptureConfig, SttOptions,
-    SttProvider, Transcript, VadProcessor, SpeechSegment,
+    encode, AudioError, AudioFormat, AudioFrame, AudioCapture, CaptureConfig, SpeechSegment,
+    SttOptions, SttProvider, Transcript, VadProcessor,
 };
 use lucy_config::LucyConfig;
 use reqwest::{multipart, Client, StatusCode};
@@ -10,7 +10,7 @@ use serde::Deserialize;
 use std::{
     path::Path,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const GROQ_ENDPOINT: &str = "https://api.groq.com/openai/v1/audio/transcriptions";
@@ -340,33 +340,35 @@ impl GroqStt {
             .start_capture(&device_id, &config)
             .map_err(|e| anyhow!(e.to_string()))?;
 
-        let started = Instant::now();
+        let started = std::time::Instant::now();
         let mut speech_started = false;
-        let mut last_voice = Instant::now();
+        let mut last_voice = started;
         let mut frames = Vec::new();
 
         while started.elapsed() < MAX_UTTERANCE {
             let Some(frame) = stream.recv().await else { break };
-            let speaking = LucyEnergyVad::default().is_speech(&frame);
+            let speaking = rms_i16(frame.samples()) >= if speech_started { END_THRESHOLD } else { START_THRESHOLD };
             frames.push(frame);
             if !speech_started {
                 if speaking && started.elapsed() >= START_WINDOW {
                     speech_started = true;
-                    last_voice = Instant::now();
+                    last_voice = std::time::Instant::now();
                 }
             } else if speaking {
-                last_voice = Instant::now();
+                last_voice = std::time::Instant::now();
             }
             if speech_started && last_voice.elapsed() >= SILENCE_AFTER_SPEECH {
                 break;
             }
         }
         capture.stop_capture();
+        if !speech_started {
+            return Err(anyhow!("no speech detected"));
+        }
         let frame = collected_frame(&frames)?;
-        let opts = self.stt_options();
         Ok(self
             .provider
-            .transcribe_frame(&frame, &opts)
+            .transcribe_frame(&frame, &self.stt_options())
             .await
             .map_err(|e| anyhow!(e.to_string()))?
             .text)
@@ -393,11 +395,10 @@ impl GroqStt {
     pub async fn finish_hold(&self, cap: HoldCapture) -> Result<String> {
         let frames = cap.finish();
         let frame = collected_frame(&frames)?;
-        let min_ms = HOLD_MIN_AUDIO.as_millis() as u32;
-        if frame.duration_ms < min_ms {
+        if frame.duration_ms < HOLD_MIN_AUDIO.as_millis() as u32 {
             return Err(anyhow!("too short — hold the hotkey while speaking, then release"));
         }
-        if !LucyEnergyVad::default().is_speech(&frame) {
+        if !has_speech(frame.samples(), frame.sample_rate, frame.channels as u16) {
             return Err(anyhow!("no speech detected"));
         }
         Ok(self
@@ -417,7 +418,7 @@ impl GroqStt {
     }
 }
 
-/// ADK VAD implementation preserving Lucy's previous energy thresholds.
+/// ADK VAD implementation preserving Lucy's previous energy detector.
 ///
 /// ADK deliberately leaves `VadProcessor` backend selection to the application,
 /// so this keeps Lucy's existing low-cost RMS detector while conforming to the
@@ -481,7 +482,10 @@ impl HoldCapture {
         if let Some(task) = self.task.take() {
             task.abort();
         }
-        self.frames.lock().map(|frames| frames.clone()).unwrap_or_default()
+        self.frames
+            .lock()
+            .map(|frames| frames.clone())
+            .unwrap_or_default()
     }
 }
 
