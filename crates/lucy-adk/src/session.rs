@@ -1,0 +1,188 @@
+use adk_core::{Content, Event, Part};
+use adk_session::{CreateRequest, DeleteRequest, GetRequest, ListRequest, Session, SessionService, SqliteSessionService};
+use anyhow::{Context, Result, anyhow};
+use chrono::Utc;
+use lucy_core::{AssistantTurn, SessionData, SessionId, SessionMeta, ToolCall, ToolResult, TurnMessage};
+use serde_json::{Value, json};
+use std::{collections::HashMap, env, path::{Path, PathBuf}, sync::Arc};
+
+pub const LUCY_SESSION_APP: &str = "lucy";
+const TITLE_KEY: &str = "lucy:title";
+const CREATED_KEY: &str = "lucy:created_at";
+
+#[derive(Clone)]
+pub struct LucySessionService {
+    service: Arc<SqliteSessionService>,
+    db_path: PathBuf,
+    user_id: String,
+}
+
+impl std::fmt::Debug for LucySessionService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LucySessionService")
+            .field("db_path", &self.db_path)
+            .field("user_id", &self.user_id)
+            .finish()
+    }
+}
+
+impl LucySessionService {
+    pub async fn open(state_dir: impl AsRef<Path>) -> Result<Self> {
+        let default_path = state_dir.as_ref().join("adk-sessions.db");
+        let db_path = env::var_os("LUCY_ADK_SESSION_DB").map(PathBuf::from).unwrap_or(default_path);
+        if let Some(parent) = db_path.parent() {
+            tokio::fs::create_dir_all(parent).await.context("creating ADK session directory")?;
+        }
+        let sqlite_url = format!("sqlite://{}", db_path.display());
+        let service = SqliteSessionService::new(&sqlite_url).await.context("opening ADK SQLite session service")?;
+        service.migrate().await.context("migrating ADK SQLite session service")?;
+        Ok(Self { service: Arc::new(service), db_path, user_id: local_user_id() })
+    }
+
+    pub fn db_path(&self) -> &Path { &self.db_path }
+    pub fn user_id(&self) -> &str { &self.user_id }
+
+    pub async fn create(&self, title: Option<String>) -> Result<SessionData> {
+        self.create_with_id(None, title).await
+    }
+
+    async fn create_with_id(&self, session_id: Option<String>, title: Option<String>) -> Result<SessionData> {
+        let now = Utc::now().timestamp() as u64;
+        let mut state = HashMap::new();
+        state.insert(TITLE_KEY.to_owned(), json!(title.unwrap_or_else(|| "untitled".to_owned())));
+        state.insert(CREATED_KEY.to_owned(), json!(now));
+        let session = self.service.create(CreateRequest {
+            app_name: LUCY_SESSION_APP.to_owned(),
+            user_id: self.user_id.clone(),
+            session_id,
+            state,
+        }).await.context("creating ADK session")?;
+        self.to_session_data(&*session).await
+    }
+
+    pub async fn load(&self, id: &SessionId) -> Result<SessionData> {
+        let session = self.service.get(GetRequest {
+            app_name: LUCY_SESSION_APP.to_owned(),
+            user_id: self.user_id.clone(),
+            session_id: id.0.to_string(),
+            num_recent_events: None,
+            after: None,
+        }).await.context("loading ADK session")?;
+        self.to_session_data(&*session).await
+    }
+
+    pub async fn list(&self) -> Result<Vec<SessionMeta>> {
+        let sessions = self.service.list(ListRequest {
+            app_name: LUCY_SESSION_APP.to_owned(),
+            user_id: self.user_id.clone(),
+            limit: None,
+            offset: None,
+        }).await.context("listing ADK sessions")?;
+        sessions.into_iter().map(|s| self.to_meta(&*s)).collect()
+    }
+
+    pub async fn save_event(&self, id: &SessionId, event: Event) -> Result<()> {
+        self.service.append_event(id.0.to_string().as_str(), event).await.context("appending event to ADK session")
+    }
+
+    pub async fn update_title(&self, id: &SessionId, title: String) -> Result<SessionMeta> {
+        let mut event = Event::new(format!("lucy-title-{}", uuid::Uuid::new_v4()));
+        event.author = "lucy".to_owned();
+        event.actions.state_delta.insert(TITLE_KEY.to_owned(), Value::String(title.trim().to_owned()));
+        self.save_event(id, event).await?;
+        self.to_meta_from_id(id).await
+    }
+
+    pub async fn delete(&self, id: &SessionId) -> Result<()> {
+        self.service.delete(DeleteRequest {
+            app_name: LUCY_SESSION_APP.to_owned(),
+            user_id: self.user_id.clone(),
+            session_id: id.0.to_string(),
+        }).await.context("deleting ADK session")
+    }
+
+    pub async fn clear(&self, id: &SessionId, title: String) -> Result<SessionData> {
+        let id_string = id.0.to_string();
+        self.delete(id).await?;
+        self.create_with_id(Some(id_string), Some(title)).await
+    }
+
+    pub async fn fork(&self, source: &SessionData) -> Result<SessionData> {
+        let title = format!("{} (fork)", source.title);
+        let forked = self.create(Some(title)).await?;
+        let loaded = self.service.get(GetRequest {
+            app_name: LUCY_SESSION_APP.to_owned(), user_id: self.user_id.clone(), session_id: source.session_id.0.to_string(), num_recent_events: None, after: None,
+        }).await?;
+        for event in loaded.events().all() {
+            self.save_event(&forked.session_id, event).await?;
+        }
+        self.load(&forked.session_id).await
+    }
+
+    pub async fn to_session_data(&self, session: &dyn Session) -> Result<SessionData> {
+        let id = uuid::Uuid::parse_str(session.id()).map_err(|e| anyhow!("invalid ADK session id: {e}"))?;
+        let title = session.state().get(TITLE_KEY).and_then(|v| v.as_str().map(ToOwned::to_owned)).unwrap_or_else(|| "untitled".to_owned());
+        let created_at = session.state().get(CREATED_KEY).and_then(|v| v.as_u64()).unwrap_or_else(|| session.events().all().first().map(|e| e.timestamp.timestamp() as u64).unwrap_or_else(|| Utc::now().timestamp() as u64));
+        let history = session.events().all().into_iter().filter_map(event_to_turn).collect();
+        Ok(SessionData { session_id: SessionId(id), title, history, created_at, updated_at: session.last_update_time().timestamp() as u64 })
+    }
+
+    async fn to_meta(&self, session: &dyn Session) -> Result<SessionMeta> {
+        Ok(SessionMeta::from(&self.to_session_data(session).await?))
+    }
+
+    async fn to_meta_from_id(&self, id: &SessionId) -> Result<SessionMeta> { self.to_meta(&*self.service.get(GetRequest { app_name: LUCY_SESSION_APP.to_owned(), user_id: self.user_id.clone(), session_id: id.0.to_string(), num_recent_events: None, after: None }).await?).await }
+
+    async fn to_session_data_ref(&self, id: &SessionId) -> Result<SessionData> { self.load(id).await }
+
+    pub async fn ensure_current(&self, resume: bool) -> Result<SessionData> {
+        if resume {
+            if let Some(meta) = self.list().await?.first().cloned() { return self.load(&meta.id).await; }
+        }
+        self.create(None).await
+    }
+}
+
+fn event_to_turn(event: Event) -> Option<TurnMessage> {
+    let content = event.llm_response.content?;
+    if content.role == "user" || event.author == "user" {
+        let text = content.parts.iter().filter_map(Part::text).collect::<Vec<_>>().join(" ");
+        return Some(TurnMessage::User(text));
+    }
+    let mut tool_calls = Vec::new();
+    let mut text = None;
+    let mut tool_result = None;
+    for part in content.parts {
+        match part {
+            Part::Text { text: value } => text = Some(value),
+            Part::FunctionCall { name, args, id, .. } => tool_calls.push(ToolCall { id: id.unwrap_or_else(|| name.clone()), name, input: args }),
+            Part::FunctionResponse { function_response, id, .. } => tool_result = Some(ToolResult { call_id: id.unwrap_or_default(), name: function_response.name, output: function_response.response, is_error: false }),
+            _ => {}
+        }
+    }
+    if let Some(result) = tool_result { return Some(TurnMessage::Tool(result)); }
+    if text.is_some() || !tool_calls.is_empty() { return Some(TurnMessage::Assistant(AssistantTurn { text, tool_calls })); }
+    None
+}
+
+fn local_user_id() -> String { env::var("LUCY_USER_ID").or_else(|_| env::var("USER")).unwrap_or_else(|_| "local".to_owned()) }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn adk_session_roundtrip_owns_history_and_state() {
+        let dir = std::env::temp_dir().join(format!("lucy-adk-session-{}", uuid::Uuid::new_v4()));
+        let store = LucySessionService::open(&dir).await.unwrap();
+        let session = store.create(Some("phase 2".into())).await.unwrap();
+        let mut event = Event::new("inv-1");
+        event.author = "user".into();
+        event.set_content(Content::new("user").with_text("hello"));
+        store.save_event(&session.session_id, event).await.unwrap();
+        let loaded = store.load(&session.session_id).await.unwrap();
+        assert_eq!(loaded.title, "phase 2");
+        assert!(matches!(&loaded.history[0], TurnMessage::User(text) if text == "hello"));
+        let _ = tokio::fs::remove_dir_all(dir).await;
+    }
+}
