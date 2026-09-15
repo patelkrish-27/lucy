@@ -1,54 +1,135 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use lucy_core::*;
 use lucy_tools::ToolRegistry;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::{collections::HashMap, process::Stdio, sync::{Arc, atomic::{AtomicU64, Ordering}}};
-use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::{Child, ChildStdin}, sync::Mutex};
+use serde_json::{Value, json};
+use std::{
+    collections::HashMap,
+    process::Stdio,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin},
+    sync::Mutex,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpServerConfig { pub name: String, pub command: String, #[serde(default)] pub args: Vec<String>, #[serde(default)] pub env: HashMap<String, String> }
+pub struct McpServerConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct McpToolDefinition { pub name: String, pub description: Option<String>, pub input_schema: Value }
+pub struct McpToolDefinition {
+    pub name: String,
+    pub description: Option<String>,
+    pub input_schema: Value,
+}
 
-struct Session { child: Child, stdin: ChildStdin, reader: BufReader<tokio::process::ChildStdout> }
-pub struct StdioMcpClient { config: McpServerConfig, session: Mutex<Option<Session>>, next_id: AtomicU64 }
+struct Session {
+    child: Child,
+    stdin: ChildStdin,
+    reader: BufReader<tokio::process::ChildStdout>,
+}
+pub struct StdioMcpClient {
+    config: McpServerConfig,
+    session: Mutex<Option<Session>>,
+    next_id: AtomicU64,
+}
 impl StdioMcpClient {
-    pub fn new(config: McpServerConfig) -> Arc<Self> { Arc::new(Self { config, session: Mutex::new(None), next_id: AtomicU64::new(1) }) }
+    pub fn new(config: McpServerConfig) -> Arc<Self> {
+        Arc::new(Self {
+            config,
+            session: Mutex::new(None),
+            next_id: AtomicU64::new(1),
+        })
+    }
     async fn ensure_connected(&self) -> Result<()> {
         let mut guard = self.session.lock().await;
-        if guard.is_some() { return Ok(()); }
+        if guard.is_some() {
+            return Ok(());
+        }
         let mut cmd = tokio::process::Command::new(&self.config.command);
-        cmd.args(&self.config.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
-        for (k, v) in &self.config.env { cmd.env(k, v); }
+        cmd.args(&self.config.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        for (k, v) in &self.config.env {
+            cmd.env(k, v);
+        }
         let mut child = cmd.spawn().context("failed to spawn MCP server")?;
-        let stdin = child.stdin.take().ok_or_else(|| anyhow!("missing MCP stdin"))?;
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("missing MCP stdout"))?;
-        let mut session = Session { child, stdin, reader: BufReader::new(stdout) };
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("missing MCP stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow!("missing MCP stdout"))?;
+        let mut session = Session {
+            child,
+            stdin,
+            reader: BufReader::new(stdout),
+        };
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         write_request(&mut session.stdin, id, "initialize", json!({"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"lucy","version":"0.3.0"}})).await?;
         read_response(&mut session.reader, id).await?;
-        session.stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").await?;
+        session
+            .stdin
+            .write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n")
+            .await?;
         *guard = Some(session);
         Ok(())
     }
     async fn request(&self, method: &str, params: Value) -> Result<Value> {
         self.ensure_connected().await?;
         let mut guard = self.session.lock().await;
-        let session = guard.as_mut().ok_or_else(|| anyhow!("MCP session unavailable"))?;
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| anyhow!("MCP session unavailable"))?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        if let Err(e) = write_request(&mut session.stdin, id, method, params).await { *guard = None; return Err(e); }
+        if let Err(e) = write_request(&mut session.stdin, id, method, params).await {
+            *guard = None;
+            return Err(e);
+        }
         match read_response(&mut session.reader, id).await {
             Ok(v) => Ok(v),
-            Err(e) => { let _ = session.child.kill().await; *guard = None; Err(e) }
+            Err(e) => {
+                let _ = session.child.kill().await;
+                *guard = None;
+                Err(e)
+            }
         }
     }
     pub async fn list_tools(&self) -> Result<Vec<McpToolDefinition>> {
         let result = self.request("tools/list", json!({})).await?;
-        Ok(result.get("tools").and_then(Value::as_array).map(|tools| tools.iter().map(|x| McpToolDefinition { name: x["name"].as_str().unwrap_or_default().to_owned(), description: x["description"].as_str().map(str::to_owned), input_schema: x["inputSchema"].clone() }).collect()).unwrap_or_default())
+        Ok(result
+            .get("tools")
+            .and_then(Value::as_array)
+            .map(|tools| {
+                tools
+                    .iter()
+                    .map(|x| McpToolDefinition {
+                        name: x["name"].as_str().unwrap_or_default().to_owned(),
+                        description: x["description"].as_str().map(str::to_owned),
+                        input_schema: x["inputSchema"].clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default())
     }
-    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> { self.request("tools/call", json!({"name": name, "arguments": arguments})).await }
+    pub async fn call_tool(&self, name: &str, arguments: Value) -> Result<Value> {
+        self.request("tools/call", json!({"name": name, "arguments": arguments}))
+            .await
+    }
 }
 
 async fn write_request(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) -> Result<()> {
@@ -57,44 +138,175 @@ async fn write_request(stdin: &mut ChildStdin, id: u64, method: &str, params: Va
     stdin.flush().await?;
     Ok(())
 }
-async fn read_response(reader: &mut BufReader<tokio::process::ChildStdout>, id: u64) -> Result<Value> {
+async fn read_response(
+    reader: &mut BufReader<tokio::process::ChildStdout>,
+    id: u64,
+) -> Result<Value> {
     let mut line = String::new();
     loop {
         line.clear();
-        if reader.read_line(&mut line).await? == 0 { return Err(anyhow!("MCP server closed stdout")); }
-        let value: Value = serde_json::from_str(line.trim()).context("invalid MCP JSON-RPC response")?;
+        if reader.read_line(&mut line).await? == 0 {
+            return Err(anyhow!("MCP server closed stdout"));
+        }
+        let value: Value =
+            serde_json::from_str(line.trim()).context("invalid MCP JSON-RPC response")?;
         if value.get("id").and_then(Value::as_u64) == Some(id) {
-            if let Some(error) = value.get("error") { return Err(anyhow!("MCP error: {}", error)); }
+            if let Some(error) = value.get("error") {
+                return Err(anyhow!("MCP error: {}", error));
+            }
             return Ok(value.get("result").cloned().unwrap_or(Value::Null));
         }
     }
 }
 
-struct McpToolProxy { client: Arc<StdioMcpClient>, definition: McpToolDefinition, full_name: String }
+struct McpToolProxy {
+    client: Arc<StdioMcpClient>,
+    definition: McpToolDefinition,
+    full_name: String,
+}
 #[async_trait]
 impl Tool for McpToolProxy {
-    fn name(&self) -> &str { &self.full_name }
-    fn description(&self) -> &str { self.definition.description.as_deref().unwrap_or("MCP tool") }
-    fn parameters_schema(&self) -> Value { self.definition.input_schema.clone() }
-    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<Value> { self.client.call_tool(&self.definition.name, input).await }
+    fn name(&self) -> &str {
+        &self.full_name
+    }
+    fn description(&self) -> &str {
+        self.definition.description.as_deref().unwrap_or("MCP tool")
+    }
+    fn parameters_schema(&self) -> Value {
+        self.definition.input_schema.clone()
+    }
+    async fn execute(&self, input: Value, _ctx: ToolContext) -> Result<Value> {
+        let result = self.client.call_tool(&self.definition.name, input).await?;
+        // MCP servers report tool-level failures inside the result
+        // (`isError: true`) while the transport stays Ok. Without this check
+        // the planner treats e.g. a Stagehand API_KEY_INVALID as success,
+        // burns steps, and then claims playback worked. Surface it as Err so
+        // the planner hits its failure/replan path instead.
+        if let Some(err) = mcp_result_error(&self.full_name, &result) {
+            return Err(anyhow!(err));
+        }
+        Ok(result)
+    }
 }
 
-pub async fn register_server(registry: &mut ToolRegistry, config: McpServerConfig) -> Result<usize> {
+fn truncate(s: &str) -> String {
+    const LIMIT: usize = 500;
+    if s.chars().count() <= LIMIT {
+        return s.to_owned();
+    }
+    let mut out: String = s.chars().take(LIMIT).collect();
+    out.push('…');
+    out
+}
+
+/// Returns the failure message when an MCP `tools/call` result reports a
+/// tool-level error, otherwise `None`. Covers both `isError: true` and the
+/// bare `error: ...` text payload some servers return without the flag.
+fn mcp_result_error(tool: &str, result: &Value) -> Option<String> {
+    if result.get("isError").and_then(Value::as_bool) == Some(true)
+        || result.get("is_error").and_then(Value::as_bool) == Some(true)
+    {
+        let detail = result
+            .get("content")
+            .and_then(Value::as_array)
+            .and_then(|items| items.first())
+            .and_then(|item| item.get("text"))
+            .and_then(Value::as_str)
+            .unwrap_or("MCP tool reported an error");
+        return Some(format!("{} failed: {}", tool, truncate(detail)));
+    }
+    if let Some(items) = result.get("content").and_then(Value::as_array) {
+        if items.len() == 1 {
+            if let Some(text) = items
+                .first()
+                .and_then(|i| i.get("text"))
+                .and_then(Value::as_str)
+            {
+                if text.trim_start().to_ascii_lowercase().starts_with("error:") {
+                    return Some(format!("{} failed: {}", tool, truncate(text)));
+                }
+            }
+        }
+    }
+    None
+}
+
+pub async fn register_server(
+    registry: &mut ToolRegistry,
+    config: McpServerConfig,
+) -> Result<usize> {
     let client = StdioMcpClient::new(config.clone());
     let defs = client.list_tools().await?;
     let mut count = 0;
     for definition in defs {
-        let full_name = format!("mcp_{}_{}", sanitize(&config.name), sanitize(&definition.name));
-        registry.register_arc(Arc::new(McpToolProxy { client: client.clone(), definition, full_name }));
+        let full_name = format!(
+            "mcp_{}_{}",
+            sanitize(&config.name),
+            sanitize(&definition.name)
+        );
+        registry.register_arc(Arc::new(McpToolProxy {
+            client: client.clone(),
+            definition,
+            full_name,
+        }));
         count += 1;
     }
     Ok(count)
 }
-fn sanitize(s: &str) -> String { s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect() }
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect()
+}
 
 pub fn load_config() -> Result<Vec<McpServerConfig>> {
-    let path = std::env::var("LUCY_MCP_CONFIG").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config/lucy/mcp.toml"));
-    if !path.exists() { return Ok(Vec::new()); }
-    #[derive(Deserialize)] struct Config { #[serde(default)] servers: Vec<McpServerConfig> }
+    let path = std::env::var("LUCY_MCP_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                .join(".config/lucy/mcp.toml")
+        });
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    #[derive(Deserialize)]
+    struct Config {
+        #[serde(default)]
+        servers: Vec<McpServerConfig>,
+    }
     Ok(toml::from_str::<Config>(&std::fs::read_to_string(path)?)?.servers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn mcp_is_error_flag_is_a_failure() {
+        let result = json!({
+            "content": [{"type": "text", "text": "error: Google error 400 Bad Request: API key not valid"}],
+            "isError": true
+        });
+        let err = mcp_result_error("mcp_hyprfast_stagehand_act", &result)
+            .expect("isError must be detected");
+        assert!(err.contains("stagehand_act"), "got {err}");
+        assert!(err.contains("API key"), "got {err}");
+    }
+
+    #[test]
+    fn bare_error_text_payload_is_a_failure() {
+        let result = json!({
+            "content": [{"type": "text", "text": "error: something broke"}]
+        });
+        assert!(mcp_result_error("mcp_hyprfast_stagehand_act", &result).is_some());
+    }
+
+    #[test]
+    fn normal_snapshot_output_is_not_a_failure() {
+        let result = json!({
+            "content": [{"type": "text", "text": "{\"raw_nodes\":60,\"snapshot\":[]}"}]
+        });
+        assert!(mcp_result_error("mcp_hyprfast_browser_snapshot", &result).is_none());
+    }
 }

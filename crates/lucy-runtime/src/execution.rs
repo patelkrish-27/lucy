@@ -59,7 +59,17 @@ pub fn build_waves(tasks: Vec<SubTask>) -> Vec<ExecutionWave> {
 /// Returns true when a task can be safely considered for parallel execution.
 /// Observations are read-only; mutating operations remain serialized by domain.
 pub fn parallel_candidate(task: &SubTask) -> bool {
-    matches!(task.category.as_str(), "browser" | "vision" | "desktop" | "excalidraw" | "clipboard" | "tasks" | "stagehand" | "hints")
+    matches!(
+        task.category.as_str(),
+        "browser"
+            | "vision"
+            | "desktop"
+            | "excalidraw"
+            | "clipboard"
+            | "tasks"
+            | "stagehand"
+            | "hints"
+    )
 }
 
 /// Detect a dependency cycle before execution. An empty graph is valid.
@@ -74,7 +84,10 @@ pub fn has_dependency_cycle(tasks: &[SubTask]) -> bool {
                 continue;
             }
             *indegree.entry(task.id.as_str()).or_default() += 1;
-            edges.entry(dep.as_str()).or_default().push(task.id.as_str());
+            edges
+                .entry(dep.as_str())
+                .or_default()
+                .push(task.id.as_str());
         }
     }
 
@@ -154,7 +167,10 @@ mod tests {
             task("click", "browser", &["observe"]),
             task("report", "desktop", &["click"]),
         ]);
-        assert_eq!(waves.iter().map(|w| w.tasks.len()).collect::<Vec<_>>(), vec![1, 1, 1]);
+        assert_eq!(
+            waves.iter().map(|w| w.tasks.len()).collect::<Vec<_>>(),
+            vec![1, 1, 1]
+        );
         assert_eq!(waves[1].tasks[0].id, "click");
     }
 
@@ -166,7 +182,7 @@ mod tests {
 
     #[test]
     fn ignores_missing_external_dependencies_for_cycle_detection() {
-        let tasks = vec![task("a", "browser", &["external"])] ;
+        let tasks = vec![task("a", "browser", &["external"])];
         assert!(!has_dependency_cycle(&tasks));
     }
 }

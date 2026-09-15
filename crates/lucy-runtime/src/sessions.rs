@@ -22,7 +22,11 @@ pub fn trim_history(history: &mut Vec<TurnMessage>, max_history: usize) {
         return;
     }
     let drop_n = history.len() - max_history;
-    if history.first().map_or(false, |m| matches!(m, TurnMessage::User(_))) && history.len() > 1 {
+    if history
+        .first()
+        .map_or(false, |m| matches!(m, TurnMessage::User(_)))
+        && history.len() > 1
+    {
         let drain_count = drop_n.min(history.len() - 1);
         history.drain(1..1 + drain_count);
     } else {
@@ -41,7 +45,19 @@ impl LucyRuntime {
     }
     pub async fn compact(&self) -> anyhow::Result<String> {
         let max = self.config.sessions.max_history;
-        let(before,recent,dropped)={let s=self.session.lock().await;if s.history.len()<=max{return Ok("nothing to compact".to_string());}let total=s.history.len();let split=total.saturating_sub(20);(total,s.history[split..].to_vec(),s.history[..split].to_vec())};
+        let (before, recent, dropped) = {
+            let s = self.session.lock().await;
+            if s.history.len() <= max {
+                return Ok("nothing to compact".to_string());
+            }
+            let total = s.history.len();
+            let split = total.saturating_sub(20);
+            (
+                total,
+                s.history[split..].to_vec(),
+                s.history[..split].to_vec(),
+            )
+        };
         let full = format!("{:?}", dropped);
         let transcript: String = full.chars().take(12000).collect();
         let model = self.provider.model();
@@ -59,7 +75,10 @@ impl LucyRuntime {
         s.history = history;
         s.updated_at = now();
         self.store.save(&s).await?;
-        Ok(format!("compacted {before} -> {} messages", s.history.len()))
+        Ok(format!(
+            "compacted {before} -> {} messages",
+            s.history.len()
+        ))
     }
     pub fn sessions_dir(&self) -> &std::path::PathBuf {
         &self.store.dir

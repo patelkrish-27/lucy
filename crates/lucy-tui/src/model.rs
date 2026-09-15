@@ -235,7 +235,9 @@ impl App {
     }
 
     pub(crate) fn busy_elapsed_ms(&self) -> u128 {
-        self.phase_since.map(|t| t.elapsed().as_millis()).unwrap_or(0)
+        self.phase_since
+            .map(|t| t.elapsed().as_millis())
+            .unwrap_or(0)
     }
 
     pub(crate) fn load_turns(&mut self, turns: &[TurnMessage]) {

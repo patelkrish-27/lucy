@@ -58,3 +58,10 @@ resume = true
 max_history = 100
 # file = "/custom/path/session.json"
 # dir = "/custom/path/sessions"  # opencode-style multi-session store (default: ~/.local/state/lucy/sessions)
+
+[approvals]
+# Permission mode for computer + shell + file tools:
+# - "write" (default) — ask before state-changing tools (each new tool asks once; `a` whitelists that tool)
+# - "never" (auto) — hands-free, never ask — same as `/auto on` or LUCY_AUTO_APPROVE=1
+# - "always" — ask before every tool
+mode = "write"
