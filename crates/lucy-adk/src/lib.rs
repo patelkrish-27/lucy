@@ -20,6 +20,10 @@ pub use adk_telemetry;
 
 /// Capabilities contributed by the ADK-Rust union that are not Lucy's
 /// latency-sensitive core loop.
+///
+/// Browser automation is intentionally excluded: HyprFast is Lucy's single
+/// authoritative browser backend. Exposing ADK Browser alongside HyprFast
+/// would create duplicate tools and make agent tool selection ambiguous.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdkCapability {
     PersistentSemanticMemory,
@@ -32,7 +36,6 @@ pub enum AdkCapability {
     Plugins,
     CodeExecution,
     SandboxedExecution,
-    BrowserAutomation,
     ComputerUse,
     RealtimeAgents,
     AudioPipelines,
@@ -57,7 +60,6 @@ impl AdkCapability {
             Self::Plugins => "plugins",
             Self::CodeExecution => "code-execution",
             Self::SandboxedExecution => "sandboxed-execution",
-            Self::BrowserAutomation => "browser-automation",
             Self::ComputerUse => "computer-use",
             Self::RealtimeAgents => "realtime-agents",
             Self::AudioPipelines => "audio-pipelines",
@@ -82,7 +84,6 @@ pub const ADK_CAPABILITIES: &[AdkCapability] = &[
     AdkCapability::Plugins,
     AdkCapability::CodeExecution,
     AdkCapability::SandboxedExecution,
-    AdkCapability::BrowserAutomation,
     AdkCapability::ComputerUse,
     AdkCapability::RealtimeAgents,
     AdkCapability::AudioPipelines,
@@ -222,6 +223,7 @@ mod tests {
         assert!(ADK_CAPABILITIES.contains(&AdkCapability::SandboxedExecution));
         assert!(ADK_CAPABILITIES.contains(&AdkCapability::Evaluation));
         assert_eq!(AdkCapability::Telemetry.as_str(), "telemetry");
+        assert!(!ADK_CAPABILITIES.iter().any(|cap| cap.as_str() == "browser-automation"));
     }
 
     #[test]
