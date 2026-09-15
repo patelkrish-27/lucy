@@ -53,21 +53,10 @@ impl StdioMcpClient {
 
 async fn write_request(stdin: &mut ChildStdin, id: u64, method: &str, params: Value) -> Result<()> {
     let req = json!({"jsonrpc":"2.0","id":id,"method":method,"params":params});
-    stdin.write_all(format!("{}\n", req).as_bytes()).await?;
-    stdin.flush().await?;
-    Ok(())
+    stdin.write_all(format!("{}\n", req).as_bytes()).await?; stdin.flush().await?; Ok(())
 }
 async fn read_response(reader: &mut BufReader<tokio::process::ChildStdout>, id: u64) -> Result<Value> {
-    let mut line = String::new();
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).await? == 0 { return Err(anyhow!("MCP server closed stdout")); }
-        let value: Value = serde_json::from_str(line.trim()).context("invalid MCP JSON-RPC response")?;
-        if value.get("id").and_then(Value::as_u64) == Some(id) {
-            if let Some(error) = value.get("error") { return Err(anyhow!("MCP error: {}", error)); }
-            return Ok(value.get("result").cloned().unwrap_or(Value::Null));
-        }
-    }
+    let mut line = String::new(); loop { line.clear(); if reader.read_line(&mut line).await? == 0 { return Err(anyhow!("MCP server closed stdout")); } let value: Value = serde_json::from_str(line.trim()).context("invalid MCP JSON-RPC response")?; if value.get("id").and_then(Value::as_u64) == Some(id) { if let Some(error) = value.get("error") { return Err(anyhow!("MCP error: {}", error)); } return Ok(value.get("result").cloned().unwrap_or(Value::Null)); } }
 }
 
 struct McpToolProxy { client: Arc<StdioMcpClient>, definition: McpToolDefinition, full_name: String }
@@ -80,21 +69,20 @@ impl Tool for McpToolProxy {
 }
 
 pub async fn register_server(registry: &mut ToolRegistry, config: McpServerConfig) -> Result<usize> {
-    let client = StdioMcpClient::new(config.clone());
-    let defs = client.list_tools().await?;
-    let mut count = 0;
-    for definition in defs {
-        let full_name = format!("mcp_{}_{}", sanitize(&config.name), sanitize(&definition.name));
-        registry.register_arc(Arc::new(McpToolProxy { client: client.clone(), definition, full_name }));
-        count += 1;
-    }
+    let client = StdioMcpClient::new(config.clone()); let defs = client.list_tools().await?; let mut count = 0;
+    for definition in defs { let full_name = format!("mcp_{}_{}", sanitize(&config.name), sanitize(&definition.name)); registry.register_arc(Arc::new(McpToolProxy { client: client.clone(), definition, full_name })); count += 1; }
     Ok(count)
 }
 fn sanitize(s: &str) -> String { s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect() }
 
+pub fn computer_use_config() -> McpServerConfig {
+    McpServerConfig { name: "computer_use".into(), command: std::env::var("LUCY_COMPUTER_USE_COMMAND").unwrap_or_else(|_| "npx".into()), args: std::env::var("LUCY_COMPUTER_USE_ARGS").map(|v| v.split_whitespace().map(str::to_owned).collect()).unwrap_or_else(|_| vec!["-y".into(), "@zavora-ai/computer-use-mcp".into()]), env: HashMap::new() }
+}
+
 pub fn load_config() -> Result<Vec<McpServerConfig>> {
     let path = std::env::var("LUCY_MCP_CONFIG").map(std::path::PathBuf::from).unwrap_or_else(|_| std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())).join(".config/lucy/mcp.toml"));
-    if !path.exists() { return Ok(Vec::new()); }
-    #[derive(Deserialize)] struct Config { #[serde(default)] servers: Vec<McpServerConfig> }
-    Ok(toml::from_str::<Config>(&std::fs::read_to_string(path)?)?.servers)
+    let mut servers = if path.exists() { #[derive(Deserialize)] struct Config { #[serde(default)] servers: Vec<McpServerConfig> } toml::from_str::<Config>(&std::fs::read_to_string(path)?)?.servers } else { Vec::new() };
+    let enabled = std::env::var("LUCY_COMPUTER_USE_ENABLED").map(|v| v != "0" && v.to_ascii_lowercase() != "false").unwrap_or(true);
+    if enabled && !servers.iter().any(|s| s.name.eq_ignore_ascii_case("computer_use")) { servers.push(computer_use_config()); }
+    Ok(servers)
 }
