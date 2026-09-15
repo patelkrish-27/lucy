@@ -80,7 +80,7 @@ fn should_skip(prompt: &str) -> bool {
 mod tests {
     use super::*;
     fn item(kind: &str, text: &str, confidence: f32, importance: f32, action: &str) -> ExtractedMemory { ExtractedMemory { kind: kind.into(), text: text.into(), importance, confidence, action: action.into(), supersedes: vec![] } }
-    #[test] fn accepts_durable_memory() { assert!(valid_candidate(&item("preference", "I prefer concise terminal answers", .95, .8, "add"))); }
-    #[test] fn rejects_low_quality_memory() { assert!(!valid_candidate(&item("fact", "I use Rust", .5, .9, "add"))); assert!(!valid_candidate(&item("unknown", "I use Rust", .9, .9, "add"))); assert!(!valid_candidate(&item("fact", "My API key is abc", .99, .99, "add"))); }
+    #[test] fn accepts_durable_memory() { assert!(valid_candidate(&item("preference", "I prefer concise terminal answers", 0.95, 0.8, "add"))); }
+    #[test] fn rejects_low_quality_memory() { assert!(!valid_candidate(&item("fact", "I use Rust", 0.5, 0.9, "add"))); assert!(!valid_candidate(&item("unknown", "I use Rust", 0.9, 0.9, "add"))); assert!(!valid_candidate(&item("fact", "My API key is abc", 0.99, 0.99, "add"))); }
     #[test] fn skips_transient_requests() { assert!(should_skip("open the browser and search for docs")); assert!(should_skip("what is Rust?")); assert!(!should_skip("I prefer Rust for new projects")); }
 }
