@@ -9,6 +9,7 @@ anyhow.workspace = true
 chrono = "0.4"
 adk-core = "2.2.0"
 adk-memory = { version = "2.2.0", features = ["sqlite-memory"] }
+adk-audio = { version = "2.2.0", features = ["stt", "desktop-audio", "fx"] }
 adk-rust = { version = "2.2.0", default-features = false, features = [
   "standard",
   "sqlite-memory",
@@ -16,6 +17,8 @@ adk-rust = { version = "2.2.0", default-features = false, features = [
   "memory-tools",
   "skills-progressive-disclosure",
   "code-tools",
+  "audio",
+  "audio-stt",
 ] }
 adk-telemetry = "2.2.0"
 serde.workspace = true
