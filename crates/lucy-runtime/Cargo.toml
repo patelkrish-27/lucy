@@ -10,6 +10,8 @@ tokio.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+uuid.workspace = true
+adk-core = "2.2.0"
 lucy-adk = { path = "../lucy-adk" }
 lucy-agent = { path = "../lucy-agent" }
 lucy-core = { path = "../lucy-core" }
