@@ -21,3 +21,13 @@ License: Apache License 2.0
 Upstream copyright: Copyright (c) 2026 Zavora AI
 
 Lucy does not vendor or replace its latency-sensitive execution engine with ADK-Rust. The integration consumes ADK-Rust as a library for complementary capabilities such as persistent memory, workflow/graph primitives, artifacts, skills, plugins, code/sandbox facilities, evaluation, telemetry, authentication, and expanded agent protocols.
+
+## ADK Computer Use MCP
+
+Lucy uses Zavora AI's `computer-use-mcp` as the native desktop actuation backend for the ADK Computer Use integration. The MCP server remains an external runtime dependency; Lucy does not vendor its implementation.
+
+Upstream project: https://github.com/zavora-ai/computer-use-mcp
+License: MIT
+Integration: `npx -y @zavora-ai/computer-use-mcp` by default, configurable through `LUCY_COMPUTER_USE_COMMAND` and `LUCY_COMPUTER_USE_ARGS`.
+
+Browser automation remains owned by HyprFast; the Computer Use MCP integration is used for native desktop/application interaction, accessibility controls, windows, menus, forms, clipboard, pointer/keyboard fallback, and application scripting where supported.
