@@ -95,6 +95,9 @@ pub const ADK_CAPABILITIES: &[AdkCapability] = &[
     AdkCapability::McpSamplingAndTransports,
 ];
 
+const DEFAULT_MEMORY_RESULTS: usize = 6;
+const MAX_MEMORY_CONTEXT_CHARS: usize = 6_000;
+
 /// Optional ADK services owned by Lucy.
 ///
 /// The default SQLite memory location lives under Lucy's state directory. Set
@@ -146,25 +149,31 @@ impl LucyAdk {
         }
     }
 
-    pub fn capabilities(&self) -> &'static [AdkCapability] {
-        ADK_CAPABILITIES
-    }
+    pub fn capabilities(&self) -> &'static [AdkCapability] { ADK_CAPABILITIES }
+    pub fn memory_enabled(&self) -> bool { self.memory.is_some() }
+    pub fn memory_path(&self) -> &Path { &self.memory_path }
 
-    pub fn memory_enabled(&self) -> bool {
-        self.memory.is_some()
-    }
-
-    pub fn memory_path(&self) -> &Path {
-        &self.memory_path
+    /// Return bounded, model-ready semantic memory context for a request.
+    /// Memory is advisory: live observations and the current request always
+    /// outrank it. Search failures are returned to the caller so Lucy can
+    /// degrade gracefully without losing the main interaction.
+    pub async fn memory_context(&self, query: &str, limit: usize) -> Result<String> {
+        if query.trim().is_empty() || self.memory.is_none() { return Ok(String::new()); }
+        let memories = self.search_memory(query, limit.max(1)).await?;
+        let mut out = String::new();
+        for (index, entry) in memories.iter().enumerate() {
+            let block = format!("\n- Memory {}: {:?}\n", index + 1, entry.content);
+            if out.len() + block.len() > MAX_MEMORY_CONTEXT_CHARS { break; }
+            out.push_str(&block);
+        }
+        Ok(out)
     }
 
     /// Persist the completed interaction without adding an extra LLM call.
     /// Lucy's existing session history remains the source of truth for turns.
     pub async fn remember_interaction(&self, session_id: &str, prompt: &str, response: &str) -> Result<()> {
         let Some(memory) = &self.memory else { return Ok(()); };
-        if prompt.trim().is_empty() && response.trim().is_empty() {
-            return Ok(());
-        }
+        if prompt.trim().is_empty() && response.trim().is_empty() { return Ok(()); }
 
         let user_id = local_user_id();
         let mut entries = Vec::with_capacity(2);
@@ -182,34 +191,38 @@ impl LucyAdk {
                 timestamp: Utc::now(),
             });
         }
-
-        memory
-            .add_session("lucy", &user_id, session_id, entries)
-            .await
-            .context("storing interaction in ADK memory")
+        memory.add_session("lucy", &user_id, session_id, entries).await.context("storing interaction in ADK memory")
     }
 
     pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
         let Some(memory) = &self.memory else { return Ok(Vec::new()); };
-        let response = memory
-            .search(SearchRequest {
-                query: query.to_owned(),
-                user_id: local_user_id(),
-                app_name: "lucy".to_owned(),
-                limit: Some(limit.max(1)),
-                min_score: None,
-                project_id: None,
-            })
-            .await
-            .context("searching ADK memory")?;
+        let response = memory.search(SearchRequest {
+            query: query.to_owned(),
+            user_id: local_user_id(),
+            app_name: "lucy".to_owned(),
+            limit: Some(limit.max(1)),
+            min_score: None,
+            project_id: None,
+        }).await.context("searching ADK memory")?;
         Ok(response.memories)
+    }
+
+    /// Store an explicit durable fact without requiring a separate session.
+    pub async fn remember_fact(&self, fact: &str) -> Result<()> {
+        let fact = fact.trim();
+        if fact.is_empty() { return Ok(()); }
+        let Some(memory) = &self.memory else { return Ok(()); };
+        let entry = MemoryEntry {
+            content: Content::new("memory").with_text(fact.to_owned()),
+            author: "lucy-memory".to_owned(),
+            timestamp: Utc::now(),
+        };
+        memory.add_session("lucy", &local_user_id(), "explicit-memory", vec![entry]).await.context("storing explicit memory")
     }
 }
 
 fn local_user_id() -> String {
-    env::var("LUCY_USER_ID")
-        .or_else(|_| env::var("USER"))
-        .unwrap_or_else(|_| "local".to_owned())
+    env::var("LUCY_USER_ID").or_else(|_| env::var("USER")).unwrap_or_else(|_| "local".to_owned())
 }
 
 #[cfg(test)]
@@ -227,7 +240,8 @@ mod tests {
     }
 
     #[test]
-    fn local_user_has_a_safe_fallback() {
-        assert!(!local_user_id().trim().is_empty());
-    }
+    fn local_user_has_a_safe_fallback() { assert!(!local_user_id().trim().is_empty()); }
+
+    #[test]
+    fn memory_context_budget_is_reasonable() { assert!(MAX_MEMORY_CONTEXT_CHARS >= 1_000); }
 }
