@@ -1,0 +1,39 @@
+[package]
+name = "lucy-adk"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+chrono = "0.4"
+adk-core = "2.2.0"
+adk-memory = { version = "2.2.0", features = ["sqlite-memory"] }
+adk-rust = { version = "2.2.0", default-features = false, features = [
+  "standard",
+  "sqlite-memory",
+  "mcp",
+  "memory-tools",
+  "skills-progressive-disclosure",
+  "code-tools",
+] }
+adk-telemetry = "2.2.0"
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[features]
+full = [
+  "adk-rust/full",
+  "adk-rust/audio-all",
+  "adk-rust/graph-time-travel",
+  "adk-rust/graph-delta",
+  "adk-rust/graph-functional",
+  "adk-rust/graph-node-cache",
+  "adk-rust/codeact",
+  "adk-rust/slack",
+  "adk-rust/bigquery",
+  "adk-rust/spanner",
+  "adk-rust/awp",
+  "adk-rust/acp",
+]
