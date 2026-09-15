@@ -7,10 +7,11 @@
 
 use std::{env, path::{Path, PathBuf}, sync::Arc};
 
-use adk_core::Content;
+use adk_core::{Content, Part};
 use adk_memory::{MemoryEntry, MemoryService, SearchRequest, SqliteMemoryService};
 use anyhow::{Context, Result};
 use chrono::Utc;
+use serde::{Deserialize, Serialize};
 
 pub use adk_audio;
 pub use adk_core;
@@ -97,6 +98,19 @@ pub const ADK_CAPABILITIES: &[AdkCapability] = &[
 
 const DEFAULT_MEMORY_RESULTS: usize = 6;
 const MAX_MEMORY_CONTEXT_CHARS: usize = 6_000;
+const MAX_MEMORY_FACT_CHARS: usize = 1_200;
+const MAX_MEMORY_CANDIDATES: usize = 4;
+
+/// A durable memory candidate produced by Lucy's write policy.
+///
+/// The semantic backend intentionally remains ADK-owned; this small schema is
+/// encoded into the memory text so retrieval can distinguish durable facts,
+/// preferences, decisions, projects, and standing instructions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryCandidate {
+    pub kind: String,
+    pub text: String,
+}
 
 /// Optional ADK services owned by Lucy.
 ///
@@ -154,44 +168,80 @@ impl LucyAdk {
     pub fn memory_path(&self) -> &Path { &self.memory_path }
 
     /// Return bounded, model-ready semantic memory context for a request.
-    /// Memory is advisory: live observations and the current request always
-    /// outrank it. Search failures are returned to the caller so Lucy can
-    /// degrade gracefully without losing the main interaction.
+    ///
+    /// ADK's memory layer is a semantic retrieval store, not Lucy's working
+    /// history. Retrieved memories are explicitly marked as advisory and carry
+    /// their timestamps so the main model can prefer newer corrections over
+    /// stale preferences.
     pub async fn memory_context(&self, query: &str, limit: usize) -> Result<String> {
         if query.trim().is_empty() || self.memory.is_none() { return Ok(String::new()); }
         let memories = self.search_memory(query, limit.max(1)).await?;
         let mut out = String::new();
         for (index, entry) in memories.iter().enumerate() {
-            let block = format!("\n- Memory {}: {:?}\n", index + 1, entry.content);
+            let text = content_text(&entry.content);
+            if text.trim().is_empty() { continue; }
+            let block = format!(
+                "\n- Memory {} [{}]: {}\n",
+                index + 1,
+                entry.timestamp.to_rfc3339(),
+                text.trim()
+            );
             if out.len() + block.len() > MAX_MEMORY_CONTEXT_CHARS { break; }
             out.push_str(&block);
         }
         Ok(out)
     }
 
-    /// Persist the completed interaction without adding an extra LLM call.
-    /// Lucy's existing session history remains the source of truth for turns.
-    pub async fn remember_interaction(&self, session_id: &str, prompt: &str, response: &str) -> Result<()> {
-        let Some(memory) = &self.memory else { return Ok(()); };
-        if prompt.trim().is_empty() && response.trim().is_empty() { return Ok(()); }
+    /// Persist only durable information from a completed interaction.
+    ///
+    /// Lucy's session history already owns the complete conversation. ADK
+    /// memory therefore must not become a transcript dump: this policy keeps
+    /// explicit user facts/preferences/decisions and standing instructions,
+    /// while ignoring transient commands, tool output, greetings, and routine
+    /// one-off questions.
+    pub async fn remember_interaction(&self, _session_id: &str, prompt: &str, response: &str) -> Result<()> {
+        let candidates = curate_interaction(prompt, response);
+        if candidates.is_empty() { return Ok(()); }
+        self.remember_candidates(&candidates).await
+    }
 
+    /// Persist curated durable memories. This is intentionally separate from
+    /// the raw interaction API so future LLM-based extraction can feed the same
+    /// validated write path without changing storage semantics.
+    pub async fn remember_candidates(&self, candidates: &[MemoryCandidate]) -> Result<()> {
+        let Some(memory) = &self.memory else { return Ok(()); };
         let user_id = local_user_id();
-        let mut entries = Vec::with_capacity(2);
-        if !prompt.trim().is_empty() {
+        let mut entries = Vec::new();
+
+        for candidate in candidates.iter().take(MAX_MEMORY_CANDIDATES) {
+            let text = candidate.text.trim();
+            if text.is_empty() || text.chars().count() > MAX_MEMORY_FACT_CHARS { continue; }
+            let kind = normalize_kind(&candidate.kind);
+            if kind.is_empty() { continue; }
+
+            let stored = format!("[{kind}] {text}");
+            if self.memory_contains_exact(memory, &user_id, &stored).await? { continue; }
             entries.push(MemoryEntry {
-                content: Content::new("user").with_text(prompt.to_owned()),
-                author: "user".to_owned(),
+                content: Content::new("memory").with_text(stored),
+                author: "lucy-memory".to_owned(),
                 timestamp: Utc::now(),
             });
         }
-        if !response.trim().is_empty() {
-            entries.push(MemoryEntry {
-                content: Content::new("model").with_text(response.to_owned()),
-                author: "lucy".to_owned(),
-                timestamp: Utc::now(),
-            });
-        }
-        memory.add_session("lucy", &user_id, session_id, entries).await.context("storing interaction in ADK memory")
+
+        if entries.is_empty() { return Ok(()); }
+        memory.add_session("lucy", &user_id, "curated-memory", entries)
+            .await
+            .context("storing curated ADK memory")
+    }
+
+    /// Store an explicit durable fact without requiring a separate session.
+    pub async fn remember_fact(&self, fact: &str) -> Result<()> {
+        let fact = fact.trim();
+        if fact.is_empty() { return Ok(()); }
+        self.remember_candidates(&[MemoryCandidate {
+            kind: "fact".to_owned(),
+            text: fact.to_owned(),
+        }]).await
     }
 
     pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
@@ -207,19 +257,67 @@ impl LucyAdk {
         Ok(response.memories)
     }
 
-    /// Store an explicit durable fact without requiring a separate session.
-    pub async fn remember_fact(&self, fact: &str) -> Result<()> {
-        let fact = fact.trim();
-        if fact.is_empty() { return Ok(()); }
-        let Some(memory) = &self.memory else { return Ok(()); };
-        let entry = MemoryEntry {
-            content: Content::new("memory").with_text(fact.to_owned()),
-            author: "lucy-memory".to_owned(),
-            timestamp: Utc::now(),
-        };
-        memory.add_session("lucy", &local_user_id(), "explicit-memory", vec![entry]).await.context("storing explicit memory")
+    async fn memory_contains_exact(&self, memory: &SqliteMemoryService, user_id: &str, stored: &str) -> Result<bool> {
+        let response = memory.search(SearchRequest {
+            query: stored.to_owned(),
+            user_id: user_id.to_owned(),
+            app_name: "lucy".to_owned(),
+            limit: Some(DEFAULT_MEMORY_RESULTS),
+            min_score: None,
+            project_id: None,
+        }).await.context("checking ADK memory for duplicate")?;
+        Ok(response.memories.iter().any(|entry| content_text(&entry.content).trim().eq_ignore_ascii_case(stored)))
     }
 }
+
+fn content_text(content: &Content) -> String {
+    content.parts.iter().filter_map(Part::text).collect::<Vec<_>>().join(" ")
+}
+
+fn normalize_kind(kind: &str) -> String {
+    match kind.trim().to_ascii_lowercase().as_str() {
+        "fact" => "fact".to_owned(),
+        "preference" => "preference".to_owned(),
+        "decision" => "decision".to_owned(),
+        "project" => "project".to_owned(),
+        "instruction" => "instruction".to_owned(),
+        _ => String::new(),
+    }
+}
+
+fn curate_interaction(prompt: &str, _response: &str) -> Vec<MemoryCandidate> {
+    let text = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() || text.len() < 8 || text.len() > MAX_MEMORY_FACT_CHARS { return Vec::new(); }
+
+    let lower = text.to_ascii_lowercase();
+    if is_transient(&lower) { return Vec::new(); }
+
+    let (kind, explicit) = if contains_any(&lower, &["remember that", "remember this", "don't forget", "do not forget", "from now on", "always "]) {
+        ("instruction", true)
+    } else if contains_any(&lower, &["i prefer ", "i'd prefer ", "i would prefer ", "i like ", "i love ", "i dislike ", "i hate ", "i don't like ", "my preference "]) {
+        ("preference", true)
+    } else if contains_any(&lower, &["i decided ", "we decided ", "let's use ", "we'll use ", "i chose ", "i choose ", "the plan is "]) {
+        ("decision", true)
+    } else if contains_any(&lower, &["i'm working on ", "i am working on ", "my project ", "i use ", "i'm using ", "i am using ", "my name is ", "call me ", "i live in ", "i work in ", "i study "]) {
+        ("fact", true)
+    } else {
+        ("fact", false)
+    };
+
+    if !explicit { return Vec::new(); }
+    vec![MemoryCandidate { kind: kind.to_owned(), text }]
+}
+
+fn is_transient(lower: &str) -> bool {
+    contains_any(lower, &[
+        "what is ", "what's ", "who is ", "who's ", "how do i ", "how can i ",
+        "can you ", "could you ", "please open ", "open ", "close ", "run ",
+        "search for ", "look up ", "show me ", "tell me ", "what time ", "weather",
+        "thanks", "thank you", "hello", "hi ", "hey ",
+    ])
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool { needles.iter().any(|needle| text.contains(needle)) }
 
 fn local_user_id() -> String {
     env::var("LUCY_USER_ID").or_else(|_| env::var("USER")).unwrap_or_else(|_| "local".to_owned())
@@ -244,4 +342,31 @@ mod tests {
 
     #[test]
     fn memory_context_budget_is_reasonable() { assert!(MAX_MEMORY_CONTEXT_CHARS >= 1_000); }
+
+    #[test]
+    fn transient_requests_are_not_saved() {
+        assert!(curate_interaction("open the browser and search for Rust docs", "Done").is_empty());
+        assert!(curate_interaction("what is the capital of France?", "Paris").is_empty());
+    }
+
+    #[test]
+    fn durable_preferences_and_facts_are_saved() {
+        let preference = curate_interaction("I prefer concise answers in the terminal", "Got it");
+        assert_eq!(preference[0].kind, "preference");
+        let fact = curate_interaction("I use Rust for my main projects", "Great");
+        assert_eq!(fact[0].kind, "fact");
+    }
+
+    #[test]
+    fn explicit_instructions_are_saved() {
+        let memory = curate_interaction("Remember that I always want tests run before merging", "Understood");
+        assert_eq!(memory[0].kind, "instruction");
+    }
+
+    #[test]
+    fn duplicate_memory_is_stable() {
+        let candidate = MemoryCandidate { kind: "fact".into(), text: "I use Rust".into() };
+        assert_eq!(normalize_kind(&candidate.kind), "fact");
+        assert!(normalize_kind("unknown").is_empty());
+    }
 }
