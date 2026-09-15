@@ -10,11 +10,6 @@ use serde_json::Value;
 
 pub const LUCY_APP_NAME: &str = "lucy";
 
-/// Canonical identity for one Lucy execution.
-///
-/// ADK owns the identity shape; Lucy only supplies its local session/user
-/// identifiers. Keeping this type here prevents a second runtime identity from
-/// being introduced later when ADK Runner/session services are adopted.
 #[derive(Debug, Clone)]
 pub struct LucyExecution {
     pub identity: ExecutionIdentity,
@@ -39,21 +34,11 @@ impl LucyExecution {
         }
     }
 
-    pub fn session_id(&self) -> &str {
-        self.identity.adk.session_id.as_ref()
-    }
-
-    pub fn invocation_id(&self) -> &str {
-        self.identity.invocation_id.as_ref()
-    }
+    pub fn session_id(&self) -> &str { self.identity.adk.session_id.as_ref() }
+    pub fn invocation_id(&self) -> &str { self.identity.invocation_id.as_ref() }
 }
 
-/// Translate Lucy's existing event stream into ADK events.
-///
-/// The bridge deliberately preserves Lucy's richer UI events (status,
-/// progress, approvals) outside the ADK event payload. ADK receives durable
-/// execution semantics: user/model/tool content, invocation identity, and
-/// structured function calls/results.
+/// Translate Lucy's existing event stream into canonical ADK events.
 pub fn to_adk_event(execution: &LucyExecution, event: &AgentEvent) -> Option<Event> {
     match event {
         AgentEvent::History { message } => history_to_event(execution, message),
@@ -68,43 +53,30 @@ pub fn to_adk_event(execution: &LucyExecution, event: &AgentEvent) -> Option<Eve
             let mut adk = Event::new(execution.invocation_id());
             adk.author = "lucy".to_owned();
             adk.set_content(adk_core::Content::new("model").with_part(Part::FunctionCall {
-                name: name.clone(),
-                args: input.clone(),
-                id: Some(id.clone()),
-                thought_signature: None,
+                name: name.clone(), args: input.clone(), id: Some(id.clone()), thought_signature: None,
             }));
             Some(adk)
         }
         AgentEvent::ToolFinished { id, name, output, is_error } => {
             let mut adk = Event::new(execution.invocation_id());
             adk.author = "lucy".to_owned();
-            let response = if *is_error {
-                serde_json::json!({ "error": output })
-            } else {
-                output.clone()
-            };
+            let response = if *is_error { serde_json::json!({ "error": output }) } else { output.clone() };
             adk.set_content(adk_core::Content::new("tool").with_part(Part::FunctionResponse {
-                function_response: adk_core::FunctionResponseData::new(name.clone(), response),
-                id: Some(id.clone()),
+                function_response: adk_core::FunctionResponseData::new(name.clone(), response), id: Some(id.clone()),
             }));
             Some(adk)
         }
         AgentEvent::Thinking { text } => {
             let mut adk = Event::new(execution.invocation_id());
             adk.author = "lucy".to_owned();
-            adk.set_content(adk_core::Content::new("model").with_part(Part::Thinking {
-                thinking: text.clone(),
-                signature: None,
-            }));
+            adk.set_content(adk_core::Content::new("model").with_part(Part::Thinking { thinking: text.clone(), signature: None }));
             Some(adk)
         }
         AgentEvent::ApprovalRequest { id, name, input } => {
             let mut adk = Event::new(execution.invocation_id());
             adk.author = "lucy".to_owned();
             adk.actions.tool_confirmation = Some(adk_core::ToolConfirmationRequest {
-                tool_call_id: id.clone(),
-                tool_name: name.clone(),
-                input: input.clone(),
+                tool_name: name.clone(), args: input.clone(), function_call_id: Some(id.clone()),
             });
             Some(adk)
         }
@@ -114,9 +86,7 @@ pub fn to_adk_event(execution: &LucyExecution, event: &AgentEvent) -> Option<Eve
             adk.set_content(adk_core::Content::new("tool").with_text(message));
             Some(adk)
         }
-        AgentEvent::Status { .. }
-        | AgentEvent::Progress { .. }
-        | AgentEvent::Done => None,
+        AgentEvent::Status { .. } | AgentEvent::Progress { .. } | AgentEvent::Done => None,
     }
 }
 
@@ -130,27 +100,19 @@ fn history_to_event(execution: &LucyExecution, message: &TurnMessage) -> Option<
         TurnMessage::Assistant(turn) => {
             event.author = "lucy".to_owned();
             let mut content = adk_core::Content::new("model");
-            if let Some(text) = &turn.text {
-                content = content.with_text(text);
-            }
+            if let Some(text) = &turn.text { content = content.with_text(text); }
             for call in &turn.tool_calls {
                 content.parts.push(Part::FunctionCall {
-                    name: call.name.clone(),
-                    args: call.input.clone(),
-                    id: Some(call.id.clone()),
-                    thought_signature: None,
+                    name: call.name.clone(), args: call.input.clone(), id: Some(call.id.clone()), thought_signature: None,
                 });
             }
-            if content.parts.is_empty() {
-                return None;
-            }
+            if content.parts.is_empty() { return None; }
             event.set_content(content);
         }
         TurnMessage::Tool(result) => {
             event.author = "tool".to_owned();
             event.set_content(adk_core::Content::new("tool").with_part(Part::FunctionResponse {
-                function_response: adk_core::FunctionResponseData::new(result.name.clone(), result.output.clone()),
-                id: Some(result.call_id.clone()),
+                function_response: adk_core::FunctionResponseData::new(result.name.clone(), result.output.clone()), id: Some(result.call_id.clone()),
             }));
         }
     }
@@ -160,37 +122,26 @@ fn history_to_event(execution: &LucyExecution, message: &TurnMessage) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
     fn creates_stable_adk_identity_per_execution() {
-        let session = SessionId::default();
-        let execution = LucyExecution::new(&session, "local");
+        let execution = LucyExecution::new(&SessionId::default(), "local");
         assert_eq!(execution.identity.adk.app_name.as_ref(), LUCY_APP_NAME);
         assert_eq!(execution.identity.agent_name, "lucy");
         assert!(!execution.session_id().is_empty());
         assert!(!execution.invocation_id().is_empty());
     }
-
     #[test]
     fn maps_user_history_to_adk_event() {
         let execution = LucyExecution::new(&SessionId::default(), "local");
-        let event = to_adk_event(&execution, &AgentEvent::History {
-            message: TurnMessage::User("hello".into()),
-        }).expect("history should become an ADK event");
+        let event = to_adk_event(&execution, &AgentEvent::History { message: TurnMessage::User("hello".into()) }).unwrap();
         assert_eq!(event.author, "user");
         assert_eq!(event.content().unwrap().parts[0].text(), Some("hello"));
         assert_eq!(event.invocation_id, execution.invocation_id());
     }
-
     #[test]
     fn maps_tool_results_to_function_response() {
         let execution = LucyExecution::new(&SessionId::default(), "local");
-        let event = to_adk_event(&execution, &AgentEvent::ToolFinished {
-            id: "call-1".into(),
-            name: "demo".into(),
-            output: Value::String("ok".into()),
-            is_error: false,
-        }).expect("tool result should become an ADK event");
+        let event = to_adk_event(&execution, &AgentEvent::ToolFinished { id: "call-1".into(), name: "demo".into(), output: Value::String("ok".into()), is_error: false }).unwrap();
         assert_eq!(event.author, "lucy");
         assert!(matches!(event.content().unwrap().parts[0], Part::FunctionResponse { .. }));
     }
