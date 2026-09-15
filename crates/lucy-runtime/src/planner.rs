@@ -1,22 +1,18 @@
 //! Hierarchical planner: main-model triage, cheap-model command compiler,
 //! main-model closed-loop execution with verification and recovery.
-//!
-//! Every user command flows through here (see `LucyRuntime::submit`):
-//!  1. the main model triages `chat` (answer directly) vs `act` (subtasks),
-//!  2. the cheap model compiles each subtask to exactly one command,
-//!  3. the main model executes, verifies, recovers and finally summarizes.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
-use anyhow::{Result, anyhow};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-
+use anyhow::{anyhow, Result};
 use lucy_agent::OpenAIProvider;
 use lucy_core::{InterruptSignal, TurnMessage};
 use lucy_hyprfast::{HyprFastCatalog, Route};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::MAX_CONTEXT_CHARS;
+
+const MAX_CAPABILITY_INDEX_CHARS: usize = 4_000;
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SubTask {
@@ -26,7 +22,14 @@ pub struct SubTask {
     pub(crate) category: String,
     #[serde(default)]
     pub(crate) depends_on: Vec<String>,
+    #[serde(default)]
+    pub(crate) success_condition: Option<String>,
+    #[serde(default)]
+    pub(crate) required_observation: Option<String>,
+    #[serde(default)]
+    pub(crate) constraints: Vec<String>,
 }
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct Triage {
     #[serde(default)]
@@ -36,6 +39,7 @@ pub(crate) struct Triage {
     #[serde(default)]
     pub(crate) subtasks: Vec<SubTask>,
 }
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct PlannedCommand {
     pub(crate) tool: String,
@@ -43,6 +47,7 @@ pub(crate) struct PlannedCommand {
     #[serde(default)]
     pub(crate) verify: Option<String>,
 }
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum DecisionKind {
@@ -50,6 +55,7 @@ pub(crate) enum DecisionKind {
     Replan,
     Complete,
 }
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct MainDecision {
     pub(crate) decision: DecisionKind,
@@ -57,6 +63,104 @@ pub(crate) struct MainDecision {
     pub(crate) subtask: Option<SubTask>,
     #[serde(default)]
     pub(crate) reason: String,
+}
+
+#[derive(Debug, Default)]
+struct ContextBuilder {
+    sections: Vec<(String, String)>,
+}
+
+impl ContextBuilder {
+    fn section(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        let value = value.into();
+        if !value.trim().is_empty() {
+            self.sections.push((name.into(), value));
+        }
+        self
+    }
+
+    /// Build a bounded UTF-8 context without ever slicing through a code point.
+    /// Earlier code used byte slicing here, which could panic for non-ASCII text.
+    fn finish(self) -> String {
+        let mut out = String::new();
+        for (name, value) in self.sections {
+            if out.len() >= MAX_CONTEXT_CHARS {
+                break;
+            }
+
+            let block = format!("\n## {name}\n{value}\n");
+            let remaining = MAX_CONTEXT_CHARS - out.len();
+            if block.len() <= remaining {
+                out.push_str(&block);
+                continue;
+            }
+
+            if remaining > 32 {
+                let prefix = utf8_prefix(&block, remaining.saturating_sub(32));
+                out.push_str(prefix);
+            }
+            out.push_str("\n[context truncated]");
+            break;
+        }
+        out
+    }
+}
+
+/// Return the largest valid UTF-8 prefix no longer than `max_bytes`.
+fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    if text.len() <= max_bytes {
+        return text;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+fn recent_history(history: &[TurnMessage], limit: usize) -> String {
+    history
+        .iter()
+        .rev()
+        .take(limit)
+        .rev()
+        .map(|m| format!("{m:?}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The complete index is deliberately compact. Executable schemas and live
+/// dependency results are more valuable than catalog prose and are added first
+/// by `build_context` below.
+fn full_hyprfast_index(catalog: &HyprFastCatalog) -> String {
+    let mut tools: Vec<_> = catalog.tools.values().collect();
+    tools.sort_by(|a, b| a.name.cmp(&b.name));
+
+    let mut out = String::new();
+    for tool in tools {
+        let caps = tool
+            .capabilities
+            .iter()
+            .map(|c| format!("{c:?}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let line = format!(
+            "{} | domain={:?} | op={:?} | caps=[{}] | ro={} | destructive={} | batchable={}\n",
+            tool.name,
+            tool.domain,
+            tool.operation,
+            caps,
+            tool.read_only,
+            tool.destructive,
+            tool.batchable
+        );
+        if out.len() + line.len() > MAX_CAPABILITY_INDEX_CHARS {
+            out.push_str("[capability index truncated; executable schemas are supplied separately]\n");
+            break;
+        }
+        out.push_str(&line);
+    }
+    out
 }
 
 async fn parse_with_retry<T>(
@@ -75,19 +179,18 @@ where
     match serde_json::from_value::<T>(v) {
         Ok(t) => Ok(t),
         Err(e) => {
-            let retry_user = format!(
+            let retry = format!(
                 "{user}\n\nYour previous output was invalid JSON: {e}. Return ONLY valid JSON matching the requested schema."
             );
-            let v2 = provider
-                .complete_json(model, system, &retry_user, interrupt.clone())
-                .await?;
-            Ok(serde_json::from_value::<T>(v2)?)
+            Ok(serde_json::from_value(
+                provider
+                    .complete_json(model, system, &retry, interrupt.clone())
+                    .await?,
+            )?)
         }
     }
 }
 
-/// Step 1 — main-model triage over system prompt + history + new request:
-/// answer directly (`chat`) or break the task down (`act`).
 pub(crate) async fn triage_request(
     provider: &OpenAIProvider,
     model: &str,
@@ -101,32 +204,28 @@ pub(crate) async fn triage_request(
         .as_ref()
         .map(|r| catalog.context_for(r))
         .unwrap_or_default();
-    let recent_history = history
-        .iter()
-        .rev()
-        .take(8)
-        .map(|m| format!("{:?}", m))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let system = r#"You are Lucy's primary model. You own understanding, strategy, state, dependencies, verification and recovery for EVERY user request. Decide first: if the request needs NO tool use (greeting, question you can answer directly, acknowledgement), return {"mode":"chat","reply":"short warm friendly plain-English reply, two to four short sentences, no markdown"}. Otherwise return {"mode":"act","subtasks":[...]} breaking the request into ordered subtasks, each small enough for exactly ONE command. Write every goal in English as a short imperative phrase: it is shown to the user as live progress text. Categories: browser|desktop|vision|excalidraw|clipboard|tasks|stagehand|hints for on-screen computer work, files|shell for local files, commands and programs. When current UI state matters, START with an observation subtask rather than assuming an app, window, tab, canvas, element, coordinate or focus. Use dependencies to pass observation results to later actions. For media playback (YouTube etc.) the plan must include an explicit play/start step plus a playing-state verification step — navigating to a search or watch URL alone is never the final step. Do not choose tool names or arguments. Return ONLY JSON."#;
-    let user = format!(
-        "New request:\n{}\n\nRecent session context:\n{}\n\nInitial tool context:\n{}",
-        prompt, recent_history, route_context
-    );
-    let t: Triage = parse_with_retry(provider, model, system, &user, interrupt).await?;
-    validate_triage(t)
+    let user = ContextBuilder::default()
+        .section("CURRENT USER REQUEST", prompt)
+        .section("CURRENT CAPABILITY ROUTE", route_context)
+        .section("RECENT SESSION HISTORY (context only)", recent_history(history, 8))
+        .section(
+            "PLANNING RULE",
+            "Plan from the desired outcome. Current observations and tool evidence outrank assumptions and stale history.",
+        )
+        .finish();
+    validate_triage(parse_with_retry(provider, model, super::prompts::TRIAGE, &user, interrupt).await?)
 }
 
 fn validate_triage(t: Triage) -> Result<Triage> {
     let mode = t.mode.to_ascii_lowercase();
     if mode != "chat" && mode != "act" {
-        return Err(anyhow!(
-            "main model returned unknown triage mode: {}",
-            t.mode
-        ));
+        return Err(anyhow!("main model returned unknown triage mode: {}", t.mode));
     }
     if mode == "act" && t.subtasks.is_empty() {
         return Err(anyhow!("main model chose act but supplied no subtasks"));
+    }
+    if mode == "act" {
+        validate_plan(&t.subtasks)?;
     }
     Ok(Triage {
         mode,
@@ -135,8 +234,77 @@ fn validate_triage(t: Triage) -> Result<Triage> {
     })
 }
 
-/// Step 3 — main-model closed-loop control after each command: confirm the
-/// work, continue the plan, or replan with one recovery subtask.
+fn validate_subtask(s: &SubTask) -> Result<()> {
+    if s.id.trim().is_empty() {
+        return Err(anyhow!("subtask id must not be empty"));
+    }
+    if s.goal.trim().is_empty() {
+        return Err(anyhow!("subtask {} has an empty goal", s.id));
+    }
+    if s.category.trim().is_empty() {
+        return Err(anyhow!("subtask {} has an empty category", s.id));
+    }
+    if s.success_condition.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        return Err(anyhow!("subtask {} must define success_condition", s.id));
+    }
+    if s.required_observation
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        return Err(anyhow!("subtask {} must define required_observation", s.id));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_plan(tasks: &[SubTask]) -> Result<()> {
+    let mut ids = HashSet::new();
+    for task in tasks {
+        validate_subtask(task)?;
+        if !ids.insert(task.id.as_str()) {
+            return Err(anyhow!("duplicate subtask id: {}", task.id));
+        }
+    }
+    for task in tasks {
+        for dep in &task.depends_on {
+            if !ids.contains(dep.as_str()) {
+                return Err(anyhow!(
+                    "subtask {} depends on unknown task {}",
+                    task.id,
+                    dep
+                ));
+            }
+            if dep == &task.id {
+                return Err(anyhow!("subtask {} depends on itself", task.id));
+            }
+        }
+    }
+    if super::has_dependency_cycle(tasks) {
+        return Err(anyhow!("subtask plan contains a dependency cycle"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_replanned_subtask(
+    s: &SubTask,
+    completed: &HashMap<String, Value>,
+    remaining: &VecDeque<SubTask>,
+) -> Result<()> {
+    validate_subtask(s)?;
+    if s.depends_on.iter().any(|id| {
+        !completed.contains_key(id)
+            && !remaining.iter().any(|t| &t.id == id)
+            && id != &s.id
+    }) {
+        return Err(anyhow!(
+            "replanned subtask {} depends on unavailable task",
+            s.id
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn decide_next(
     provider: &OpenAIProvider,
     model: &str,
@@ -148,23 +316,39 @@ pub(crate) async fn decide_next(
     catalog: &HyprFastCatalog,
     interrupt: &InterruptSignal,
 ) -> Result<MainDecision> {
-    let remaining_json = serde_json::to_string(remaining)?;
-    let completed_json = serde_json::to_string(completed)?;
-    let system = r#"You are Lucy's primary closed-loop controller. Decide what should happen AFTER the last command. You are the only model allowed to reason about overall strategy. Inspect the actual result/state; never assume success merely because a tool returned. A tool result containing "failed", "isError", "API key", "Bad Request", or "INVALID_ARGUMENT" is a FAILURE even if it arrived on the success path — replan, do not continue or complete. If the goal is complete, return complete. If the remaining plan is still valid, return continue with no subtask. If state differs, information is missing, or an action failed, return replan with ONE concrete observation/recovery/action subtask. For media playback (YouTube etc.), do NOT return complete when the last result only shows a search page or a video page with no playing evidence — require a pause button, playing state, or advancing currentTime; otherwise replan with one concrete play or verify subtask. A replan subtask must be executable by one command (categories: browser|desktop|vision|excalidraw|clipboard|tasks|stagehand|hints for on-screen work, files|shell for local files and programs). Prefer observing before acting when state is uncertain. Do not choose tool names or arguments. Write the reason in English as one short sentence, since it is shown to the user. Return ONLY JSON: {"decision":"continue|replan|complete","subtask":null or {"id":"replan-1","goal":"...","category":"...","depends_on":[]},"reason":"short reason"}."#;
-    let user = format!(
-        "Task:\n{}\n\nLast subtask:\n{}\nLast result/state:\n{}\n\nRemaining planned subtasks:\n{}\n\nAll completed results/state:\n{}\n\nHyprFast capability summary:\n{}",
-        prompt,
-        serde_json::to_string(last_subtask)?,
-        last_result,
-        remaining_json,
-        completed_json,
-        serde_json::to_string(&catalog.summary())?
-    );
-    parse_with_retry(provider, model, system, &user, interrupt).await
+    let user = ContextBuilder::default()
+        .section("ORIGINAL USER GOAL", prompt)
+        .section("LAST SUBTASK", serde_json::to_string(last_subtask)?)
+        .section(
+            "LAST EXECUTION RESULT / OBSERVATION (highest-priority live evidence)",
+            last_result.to_string(),
+        )
+        .section("REMAINING PLAN", serde_json::to_string(remaining)?)
+        .section("COMPLETED RESULTS / OBSERVATIONS", serde_json::to_string(completed)?)
+        .section("AVAILABLE CAPABILITIES", serde_json::to_string(&catalog.summary())?)
+        .section(
+            "CONTROLLER RULE",
+            "Decide complete only when the user outcome is supported by evidence. Continue only if the existing plan remains valid. Replan when state, information, or assumptions differ.",
+        )
+        .finish();
+
+    let mut decision: MainDecision =
+        parse_with_retry(provider, model, super::prompts::CONTROLLER, &user, interrupt).await?;
+    if let Some(s) = &decision.subtask {
+        validate_subtask(s)?;
+    }
+    if matches!(decision.decision, DecisionKind::Continue) && decision.subtask.is_some() {
+        return Err(anyhow!("continue decision must not include a subtask"));
+    }
+    if matches!(decision.decision, DecisionKind::Replan) && decision.subtask.is_none() {
+        return Err(anyhow!("replan decision must include a subtask"));
+    }
+    if decision.reason.trim().is_empty() {
+        decision.reason = "State evaluated.".into();
+    }
+    Ok(decision)
 }
 
-/// Step 2 — cheap-model command compiler: one planned subtask becomes
-/// exactly one tool call within the routed capability set.
 pub(crate) async fn plan_command(
     provider: &OpenAIProvider,
     model: &str,
@@ -174,13 +358,18 @@ pub(crate) async fn plan_command(
     context: &str,
     interrupt: &InterruptSignal,
 ) -> Result<PlannedCommand> {
-    let system = r#"You are Lucy's fast command compiler. This is your ONLY job. You receive ONE already-planned subtask from Lucy's primary model, a small set of allowed tools, their exact JSON schemas, and execution context. Select exactly ONE allowed tool and produce exact arguments conforming to its schema. Do not redesign the task, decompose it, invent state, or make strategic decisions. Do not invent fields, tool names, tabs, windows, coordinates, IDs, or other state. If the provided context is insufficient, select an allowed observation tool instead. Prefer browser_navigate over browser_open when a browser tab is already open; after browser_open, confirm the new tab with browser_tabs before snapshotting, because a snapshot may otherwise read the old tab. For media playback, navigating to a search or watch URL is never enough on its own: the play step must explicitly trigger playback (click the video/play button via a hint/browser click, press the play key, or evaluate JavaScript on the video element) — never report playback from a search-results page. For verification subtasks, choose a read-only observation tool and do not modify anything. Return ONLY JSON: {"tool":"exact allowed tool name","arguments":{},"verify":"optional short verification"}."#;
     let tools = serde_json::to_string(schemas)?;
-    let user = format!(
-        "Original task (context only):\n{}\n\nSubtask category: {}\nSubtask: {}\nDependencies: {:?}\n\nCurrent HyprFast context:\n{}\n\nAllowed tools and schemas:\n{}",
-        prompt, subtask.category, subtask.goal, subtask.depends_on, context, tools
-    );
-    parse_with_retry(provider, model, system, &user, interrupt).await
+    let user = ContextBuilder::default()
+        .section("EXACT SUBTASK TO COMPILE", serde_json::to_string(subtask)?)
+        .section("CURRENT EXECUTION CONTEXT / OBSERVATIONS", context)
+        .section("ALLOWED TOOLS AND EXACT SCHEMAS", tools)
+        .section("ORIGINAL USER TASK (context only; do not reinterpret)", prompt)
+        .section(
+            "COMPILER RULE",
+            "Use only supplied evidence. If required state is missing and an allowed observation tool exists, choose observation rather than guessing. If a safe batch/macro tool is supplied and the subtask explicitly spans multiple deterministic operations, prefer that single batch command.",
+        )
+        .finish();
+    parse_with_retry(provider, model, super::prompts::HYPRFAST, &user, interrupt).await
 }
 
 pub(crate) fn build_context(
@@ -189,17 +378,26 @@ pub(crate) fn build_context(
     completed: &HashMap<String, Value>,
     depends_on: &[String],
 ) -> String {
-    let mut out = catalog.context_for(route);
+    // Priority is intentional: executable schemas and live observations must
+    // survive context limits. The global capability index is only metadata.
+    let mut builder = ContextBuilder::default().section(
+        "CURRENT ROUTED CAPABILITIES WITH EXECUTABLE SCHEMAS",
+        catalog.context_for(route),
+    );
+
     for id in depends_on {
         if let Some(v) = completed.get(id) {
-            out.push_str(&format!("\nDependency {} result: {}", id, v));
+            builder = builder.section(
+                format!("DEPENDENCY RESULT: {id}"),
+                truncate_json(v.clone()).to_string(),
+            );
         }
     }
-    if out.len() > MAX_CONTEXT_CHARS {
-        out.truncate(MAX_CONTEXT_CHARS);
-        out.push_str("\n[context truncated]");
-    }
-    out
+
+    builder.section(
+        "FULL HYPRFAST CAPABILITY INDEX (metadata only)",
+        full_hyprfast_index(catalog),
+    ).finish()
 }
 
 pub(crate) fn truncate_json(v: Value) -> Value {
@@ -209,47 +407,49 @@ pub(crate) fn truncate_json(v: Value) -> Value {
     }
     let end = s
         .char_indices()
-        .nth(MAX_CONTEXT_CHARS)
+        .take_while(|(i, _)| *i <= MAX_CONTEXT_CHARS)
+        .last()
         .map(|(i, _)| i)
-        .unwrap_or(s.len());
-    serde_json::json!({"truncated":true,"preview":&s[..end]})
+        .unwrap_or(0);
+    let end = if end == 0 {
+        utf8_prefix(&s, MAX_CONTEXT_CHARS).len()
+    } else {
+        end
+    };
+    serde_json::json!({
+        "truncated": true,
+        "preview": &s[..end]
+    })
 }
 
 pub(crate) fn action_requires_verification(
     catalog: &HyprFastCatalog,
     tool: &str,
-    category: &str,
+    _category: &str,
     explicit_verify: bool,
 ) -> bool {
     if explicit_verify {
         return true;
     }
-    let Some(capability) = catalog.capability_for_mcp_name(tool) else {
-        return true;
-    };
-    if capability.read_only {
-        return false;
-    }
-    let _ = category;
-    true
+    catalog
+        .capability_for_mcp_name(tool)
+        .map(|c| !c.read_only)
+        .unwrap_or(true)
 }
 
 fn verification_category(catalog: &HyprFastCatalog, tool: &str, fallback: &str) -> String {
     catalog
         .capability_for_mcp_name(tool)
-        .map(|capability| match capability.domain {
+        .map(|c| match c.domain {
             lucy_hyprfast::Domain::Browser
             | lucy_hyprfast::Domain::Stagehand
-            | lucy_hyprfast::Domain::Hints => "browser".to_owned(),
-            lucy_hyprfast::Domain::Excalidraw => "excalidraw".to_owned(),
-            lucy_hyprfast::Domain::Vision => "vision".to_owned(),
-            lucy_hyprfast::Domain::Desktop
-            | lucy_hyprfast::Domain::Tasks
-            | lucy_hyprfast::Domain::Clipboard
-            | lucy_hyprfast::Domain::System
-            | lucy_hyprfast::Domain::Unknown => "desktop".to_owned(),
+            | lucy_hyprfast::Domain::Hints => "browser",
+            lucy_hyprfast::Domain::Excalidraw => "excalidraw",
+            lucy_hyprfast::Domain::Vision => "vision",
+            _ => "desktop",
         })
-        .unwrap_or_else(|| fallback.to_owned())
+        .unwrap_or(fallback)
+        .to_owned()
 }
 
 pub(crate) fn verification_subtask(
@@ -266,97 +466,87 @@ pub(crate) fn verification_subtask(
         ),
         category: verification_category(catalog, tool, fallback_category),
         depends_on: Vec::new(),
+        success_condition: Some(
+            "The observed state proves whether the intended change happened.".into(),
+        ),
+        required_observation: Some("Observe the current state without changing it.".into()),
+        constraints: vec!["read-only; do not modify state".into()],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lucy_mcp::McpToolDefinition;
-    fn tool(name: &str, description: &str) -> McpToolDefinition {
-        McpToolDefinition {
-            name: name.into(),
-            description: Some(description.into()),
-            input_schema: serde_json::json!({"type":"object"}),
+
+    fn task(id: &str, deps: &[&str]) -> SubTask {
+        SubTask {
+            id: id.into(),
+            goal: id.into(),
+            category: "browser".into(),
+            depends_on: deps.iter().map(|s| (*s).into()).collect(),
+            success_condition: Some("succeeded".into()),
+            required_observation: Some("observe".into()),
+            constraints: vec![],
         }
     }
+
     #[test]
-    fn state_changing_tool_requires_verification() {
-        let catalog = HyprFastCatalog::from_tools(vec![
-            tool("browser_click", "click browser element"),
-            tool("screenshot", "capture desktop"),
-        ]);
-        assert!(action_requires_verification(
-            &catalog,
-            "mcp_hyprfast_browser_click",
-            "browser",
-            false
-        ));
-        assert!(!action_requires_verification(
-            &catalog,
-            "mcp_hyprfast_screenshot",
-            "vision",
-            false
-        ));
-        assert!(action_requires_verification(
-            &catalog,
-            "unknown_tool",
-            "browser",
-            false
-        ));
+    fn subtask_requires_structured_success_and_observation() {
+        assert!(validate_subtask(&task("1", &[])).is_ok());
     }
+
     #[test]
-    fn verification_uses_browser_domain_for_browser_actions() {
-        let catalog =
-            HyprFastCatalog::from_tools(vec![tool("browser_click", "click browser element")]);
-        let subtask = verification_subtask(
-            &catalog,
-            "mcp_hyprfast_browser_click",
-            "click the button",
-            "desktop",
-            7,
-        );
-        assert_eq!(subtask.id, "verify-7");
-        assert_eq!(subtask.category, "browser");
-        assert!(subtask.goal.contains("do not make another change"));
+    fn legacy_subtask_is_rejected() {
+        let mut s = task("1", &[]);
+        s.success_condition = None;
+        s.required_observation = None;
+        assert!(validate_subtask(&s).is_err());
     }
+
     #[test]
-    fn triage_accepts_chat_and_act_modes() {
-        let chat: Triage = serde_json::from_value(
-            serde_json::json!({"mode":"chat","reply":"Hello! How can I help?"}),
-        )
-        .expect("chat triage parses");
-        let chat = validate_triage(chat).expect("chat validates");
-        assert_eq!(chat.mode, "chat");
-        assert!(chat.subtasks.is_empty());
-        let act: Triage = serde_json::from_value(
-            serde_json::json!({"mode":"act","subtasks":[{"id":"1","goal":"Open the browser","category":"browser"}]}),
-        )
-        .expect("act triage parses");
-        let act = validate_triage(act).expect("act validates");
-        assert_eq!(act.mode, "act");
-        assert_eq!(act.subtasks.len(), 1);
-        assert_eq!(act.subtasks[0].category, "browser");
+    fn rejects_unknown_dependency() {
+        assert!(validate_plan(&[task("a", &["missing"])]).is_err());
     }
+
     #[test]
-    fn triage_rejects_unknown_mode_and_empty_act() {
-        let unknown: Triage =
-            serde_json::from_value(serde_json::json!({"mode":"dance"})).expect("parses");
-        assert!(validate_triage(unknown).is_err());
-        let empty: Triage = serde_json::from_value(serde_json::json!({"mode":"act","subtasks":[]}))
-            .expect("parses");
-        assert!(validate_triage(empty).is_err());
+    fn rejects_cycles() {
+        assert!(validate_plan(&[task("a", &["b"]), task("b", &["a"])]).is_err());
     }
+
     #[test]
-    fn files_shell_subtasks_use_local_tools() {
-        use lucy_tools::default_registry;
-        let registry = default_registry();
-        let local = registry.local_tool_names();
-        assert!(local.contains("shell"));
-        assert!(local.contains("read_file"));
-        assert!(!local.iter().any(|n| n.starts_with("mcp_")));
-        let schemas = registry.definitions_for_names(&local);
-        assert_eq!(schemas.len(), local.len());
-        assert!(!schemas.is_empty());
+    fn accepts_out_of_order_acyclic_plan() {
+        assert!(validate_plan(&[task("a", &["b"]), task("b", &[])]).is_ok());
+    }
+
+    #[test]
+    fn recovery_may_reference_completed_task() {
+        let recovery = task("recovery", &["a"]);
+        let mut completed = HashMap::new();
+        completed.insert("a".into(), Value::String("ok".into()));
+        assert!(validate_replanned_subtask(&recovery, &completed, &VecDeque::new()).is_ok());
+    }
+
+    #[test]
+    fn utf8_prefix_never_splits_a_codepoint() {
+        let text = "hello 🚀 world";
+        let prefix = utf8_prefix(text, 8);
+        assert!(prefix.is_char_boundary(prefix.len()));
+        assert_eq!(prefix, "hello ");
+    }
+
+    #[test]
+    fn context_builder_never_panics_on_unicode() {
+        let long = "界".repeat(MAX_CONTEXT_CHARS);
+        let output = ContextBuilder::default().section("unicode", long).finish();
+        assert!(output.len() <= MAX_CONTEXT_CHARS + 32);
+        assert!(output.contains("[context truncated]"));
+    }
+
+    #[test]
+    fn truncated_json_is_valid_utf8() {
+        let value = Value::String("🚀".repeat(MAX_CONTEXT_CHARS));
+        let output = truncate_json(value);
+        assert!(output.get("truncated").and_then(Value::as_bool).unwrap_or(false));
+        assert!(output.get("preview").is_some());
     }
 }

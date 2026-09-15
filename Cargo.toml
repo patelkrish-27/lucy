@@ -11,6 +11,7 @@ members = [
   "crates/lucy-cli",
   "crates/lucy-stt",
   "crates/lucy-config",
+  "crates/lucy-adk",
 ]
 
 [workspace.package]
