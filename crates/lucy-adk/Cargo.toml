@@ -8,10 +8,12 @@ license.workspace = true
 anyhow.workspace = true
 chrono = "0.4"
 adk-core = "2.2.0"
+adk-computer-use = "2.2.0"
 adk-memory = { version = "2.2.0", features = ["sqlite-memory"] }
 adk-audio = { version = "2.2.0", features = ["stt", "desktop-audio", "fx"] }
 adk-rust = { version = "2.2.0", default-features = false, features = [
   "standard",
+  "computer-use",
   "sqlite-memory",
   "mcp",
   "memory-tools",
