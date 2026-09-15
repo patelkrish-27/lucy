@@ -22,7 +22,7 @@ impl LucyRuntime {
     pub async fn clear_session(&self)->Result<()>{let current=self.session.lock().await.clone();let fresh=self.session_service.clear(&current.session_id,current.title.clone()).await?;*self.session.lock().await=fresh;Ok(())}
     pub async fn clear_current(&self)->Result<SessionMeta>{self.clear_session().await?;Ok(self.current_meta().await)}
     pub async fn compact(&self)->Result<String>{let max=self.config.sessions.max_history;let mut s=self.session.lock().await;let before=s.history.len();if before<=max{return Ok("nothing to compact".to_string());}trim_history(&mut s.history,max);Ok(format!("compacted {before} -> {} messages in runtime context; ADK event history remains append-only",s.history.len()))}
-    pub async fn compact_current(&self,keep:usize)->Result<(usize,usize)>{let mut s=self.session.lock().await;let before=s.history.len();trim_history(&mut s,keep.max(1));Ok((before,s.history.len()))}
+    pub async fn compact_current(&self,keep:usize)->Result<(usize,usize)>{let mut s=self.session.lock().await;let before=s.history.len();trim_history(&mut s.history,keep.max(1));Ok((before,s.history.len()))}
     pub async fn export_current(&self,path:std::path::PathBuf)->Result<()>{let s=self.session_service.load(&self.session.lock().await.session_id).await?;s.save_to_file(&path).await}
     pub async fn session_service(&self)->LucySessionService{(*self.session_service).clone()}
 }
