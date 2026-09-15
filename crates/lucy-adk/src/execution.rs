@@ -4,9 +4,8 @@
 //! planning and capability policy, while ADK becomes the canonical identity
 //! and event representation at the runtime boundary.
 
-use adk_core::{AdkIdentity, AppName, Event, ExecutionIdentity, InvocationId, Part, UserId};
+use adk_core::{AdkIdentity, AppName, Content, Event, ExecutionIdentity, InvocationId, Part, UserId};
 use lucy_core::{AgentEvent, SessionId, TurnMessage};
-use serde_json::Value;
 
 pub const LUCY_APP_NAME: &str = "lucy";
 
@@ -46,30 +45,41 @@ pub fn to_adk_event(execution: &LucyExecution, event: &AgentEvent) -> Option<Eve
             let mut adk = Event::with_id(format!("lucy-stream-{}", execution.invocation_id()), execution.invocation_id());
             adk.author = "lucy".to_owned();
             adk.llm_response.partial = true;
-            adk.set_content(adk_core::Content::new("model").with_text(text));
+            adk.set_content(Content::new("model").with_text(text));
             Some(adk)
         }
         AgentEvent::ToolStarted { id, name, input } => {
             let mut adk = Event::new(execution.invocation_id());
             adk.author = "lucy".to_owned();
-            adk.set_content(adk_core::Content::new("model").with_part(Part::FunctionCall {
-                name: name.clone(), args: input.clone(), id: Some(id.clone()), thought_signature: None,
-            }));
+            adk.set_content(Content {
+                role: "model".to_owned(),
+                parts: vec![Part::FunctionCall {
+                    name: name.clone(), args: input.clone(), id: Some(id.clone()), thought_signature: None,
+                }],
+            });
             Some(adk)
         }
         AgentEvent::ToolFinished { id, name, output, is_error } => {
             let mut adk = Event::new(execution.invocation_id());
             adk.author = "lucy".to_owned();
             let response = if *is_error { serde_json::json!({ "error": output }) } else { output.clone() };
-            adk.set_content(adk_core::Content::new("tool").with_part(Part::FunctionResponse {
-                function_response: adk_core::FunctionResponseData::new(name.clone(), response), id: Some(id.clone()),
-            }));
+            adk.set_content(Content {
+                role: "function".to_owned(),
+                parts: vec![Part::FunctionResponse {
+                    function_response: adk_core::FunctionResponseData::new(name.clone(), response),
+                    id: Some(id.clone()),
+                    annotations: None,
+                }],
+            });
             Some(adk)
         }
         AgentEvent::Thinking { text } => {
             let mut adk = Event::new(execution.invocation_id());
             adk.author = "lucy".to_owned();
-            adk.set_content(adk_core::Content::new("model").with_part(Part::Thinking { thinking: text.clone(), signature: None }));
+            adk.set_content(Content {
+                role: "model".to_owned(),
+                parts: vec![Part::Thinking { thinking: text.clone(), signature: None }],
+            });
             Some(adk)
         }
         AgentEvent::ApprovalRequest { id, name, input } => {
@@ -83,7 +93,7 @@ pub fn to_adk_event(execution: &LucyExecution, event: &AgentEvent) -> Option<Eve
         AgentEvent::Error { message } => {
             let mut adk = Event::new(execution.invocation_id());
             adk.author = "lucy".to_owned();
-            adk.set_content(adk_core::Content::new("tool").with_text(message));
+            adk.set_content(Content::new("tool").with_text(message));
             Some(adk)
         }
         AgentEvent::Status { .. } | AgentEvent::Progress { .. } | AgentEvent::Done => None,
@@ -95,11 +105,11 @@ fn history_to_event(execution: &LucyExecution, message: &TurnMessage) -> Option<
     match message {
         TurnMessage::User(text) => {
             event.author = "user".to_owned();
-            event.set_content(adk_core::Content::new("user").with_text(text));
+            event.set_content(Content::new("user").with_text(text));
         }
         TurnMessage::Assistant(turn) => {
             event.author = "lucy".to_owned();
-            let mut content = adk_core::Content::new("model");
+            let mut content = Content::new("model");
             if let Some(text) = &turn.text { content = content.with_text(text); }
             for call in &turn.tool_calls {
                 content.parts.push(Part::FunctionCall {
@@ -111,9 +121,14 @@ fn history_to_event(execution: &LucyExecution, message: &TurnMessage) -> Option<
         }
         TurnMessage::Tool(result) => {
             event.author = "tool".to_owned();
-            event.set_content(adk_core::Content::new("tool").with_part(Part::FunctionResponse {
-                function_response: adk_core::FunctionResponseData::new(result.name.clone(), result.output.clone()), id: Some(result.call_id.clone()),
-            }));
+            event.set_content(Content {
+                role: "function".to_owned(),
+                parts: vec![Part::FunctionResponse {
+                    function_response: adk_core::FunctionResponseData::new(result.name.clone(), result.output.clone()),
+                    id: Some(result.call_id.clone()),
+                    annotations: None,
+                }],
+            });
         }
     }
     Some(event)
@@ -122,6 +137,8 @@ fn history_to_event(execution: &LucyExecution, message: &TurnMessage) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
+
     #[test]
     fn creates_stable_adk_identity_per_execution() {
         let execution = LucyExecution::new(&SessionId::default(), "local");
@@ -130,6 +147,7 @@ mod tests {
         assert!(!execution.session_id().is_empty());
         assert!(!execution.invocation_id().is_empty());
     }
+
     #[test]
     fn maps_user_history_to_adk_event() {
         let execution = LucyExecution::new(&SessionId::default(), "local");
@@ -138,6 +156,7 @@ mod tests {
         assert_eq!(event.content().unwrap().parts[0].text(), Some("hello"));
         assert_eq!(event.invocation_id, execution.invocation_id());
     }
+
     #[test]
     fn maps_tool_results_to_function_response() {
         let execution = LucyExecution::new(&SessionId::default(), "local");
