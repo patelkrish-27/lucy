@@ -214,6 +214,19 @@ impl App {
         if m.is_empty() {
             return;
         }
+        // Transient triage note — show only as spinner, never as persistent feed.
+        if m == "Understanding your request…" {
+            if self.phase.trim().is_empty() {
+                self.phase = "Thinking".to_owned();
+            }
+            self.phase_detail = m.clone();
+            self.busy = true;
+            if self.phase_since.is_none() {
+                self.phase_since = Some(Instant::now());
+            }
+            self.status = format!("{}… — {}", self.phase, truncate_one_line(&m, 80));
+            return;
+        }
         if self.progress.back().is_some_and(|l| l == &m) {
             return;
         }

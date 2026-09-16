@@ -172,6 +172,8 @@ pub async fn run_voice(stt: Option<Arc<GroqStt>>) -> anyhow::Result<()> {
         if agent_done{
             agent_rx=None;
             app.flush_stream();
+            // Drop any stale transient triage note that was ever pushed to the feed.
+            app.progress.retain(|p| p.trim() != "Understanding your request…");
             app.mark_idle();
             app.pin();
             // Refresh session meta (title/count may have changed).
