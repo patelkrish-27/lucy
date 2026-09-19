@@ -15,31 +15,42 @@ Lucy is a Rust-native, terminal-first AI computer agent. The architecture is mod
 - `lucy-tui` — Ratatui terminal interface
 - `lucy` — executable CLI
 
-## HyprFast task architecture
+## Agent architecture
 
-Lucy does not blindly map a detected intent directly to a computer tool. For computer-operation tasks it uses a hierarchical pipeline:
+Lucy uses one reasoning model and a deterministic Rust execution runtime:
 
 ```text
 User request
     ↓
-Cheap task decomposer
+Context builder
+    ├── session history
+    ├── long-term memory
+    ├── current capability route
+    └── live execution evidence
     ↓
-Ordered concrete subtasks
-    ↓
-HyprFast category router
-    ↓
-Cheap command planner + exact tool schemas + current results
-    ↓
-One validated HyprFast command
-    ↓
-HyprFast execution
-    ↓
-Result becomes context for the next subtask
+Main model
+    ├── chat response, or
+    └── structured task plan
+            ↓
+Dependency scheduler
+            ↓
+Main model selects exactly one tool
+            ↓
+Rust validation + approval policy
+            ↓
+MCP / HyprFast / local tool execution
+            ↓
+Result + observation
+            ↓
+Verification
+    ├── complete
+    ├── continue
+    └── main-model recovery/replan
 ```
 
-For example, `draw a human in the existing Excalidraw tab` can become observation first, then concrete drawing operations. The cheap planner receives only the relevant HyprFast tools and their exact JSON schemas for each subtask, rather than the entire HyprFast catalog. It is explicitly instructed not to invent UI state, IDs, coordinates, tab numbers, or arguments that are not supported by the supplied context.
+The main model owns strategy, decomposition, tool selection, verification, and recovery. There is no secondary or cheap model in the execution path. The runtime supplies exact tool schemas for the current subtask, validates the selected tool and arguments, enforces approvals and execution budgets, and records live evidence.
 
-Set `LUCY_PLANNER_MODEL` to choose the cheap planning model. It defaults to `gpt-4o-mini`. The main agent model remains controlled by `OPENAI_MODEL`.
+For example, `draw a human in the existing Excalidraw tab` can become observation first, followed by drawing operations. The model is explicitly instructed not to invent UI state, IDs, coordinates, tab numbers, or arguments that are not supported by the supplied context.
 
 ## jcode foundation
 
