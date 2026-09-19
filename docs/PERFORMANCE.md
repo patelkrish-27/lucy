@@ -86,7 +86,7 @@ Lucy should measure:
 
 - end-to-end latency
 - main-model calls/task
-- cheap-model calls/task
+- main-model calls/task
 - MCP calls/task
 - screenshot/vision calls/task
 - tool execution latency
