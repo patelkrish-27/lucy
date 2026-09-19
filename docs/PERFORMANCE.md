@@ -8,9 +8,9 @@ Lucy should optimize for **wall-clock task completion**, not token count alone. 
 
 Use the main model to create the structured plan once. Do not ask it to re-decide after every successful action. Re-enter the main model only for failure, unexpected state, recovery, or final evidence-based completion.
 
-### 2. Cheap command compiler
+### 2. Main-model tool selection
 
-Compile each planned subtask into an exact HyprFast command. The compiler must never re-plan. Keep its prompt tiny and schema-focused. A local/very-low-latency model is ideal.
+The main model selects the exact tool and arguments for each ready subtask using only the allowed schemas and current execution evidence. Keep the selection prompt bounded to the current subtask rather than the entire capability catalog.
 
 ### 3. Macro/batch tools
 
@@ -50,7 +50,7 @@ Cache capability routing and safe, state-independent compiler decisions. Never b
 USER
   -> MAIN MODEL: plan once
   -> dependency scheduler
-  -> cheap compiler
+  -> main-model tool selection
   -> HyprFast macro/direct command
   -> event/state update
   -> next independent command
@@ -77,7 +77,7 @@ main model -> tool -> main model -> tool -> screenshot -> main model -> tool
 The desired pattern is:
 
 ```text
-main model -> [cheap compiler -> batch tool -> state event] x N -> verify
+main model -> [tool selection -> batch tool -> state event] x N -> verify
 ```
 
 ## Benchmark requirements
