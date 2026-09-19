@@ -8,7 +8,7 @@ This document records the capability-by-capability comparison between Lucy `main
 - Voice/STT push-to-talk path.
 - The latency-sensitive main agent loop.
 - Main-model-first planning and recovery.
-- Cheap-model-only HyprFast command compilation.
+- Main-model tool selection with exact schemas.
 - HyprFast capability discovery and routing.
 - Dependency-aware execution waves and conservative concurrency.
 - State-changing action verification.
@@ -48,7 +48,7 @@ These pieces remain Lucy-owned because they are product-specific and sit directl
 ## Deep-merge rules
 
 1. Lucy's existing main-model-first execution loop remains authoritative.
-2. `HyprFast` keeps the only cheap-model exception: subtask-to-exact-command compilation.
+2. The main model owns both strategic planning and concrete tool selection; no secondary model is required.
 3. ADK-Rust is consumed natively as Rust crates; no Python runtime or subprocess bridge is introduced.
 4. Persistent memory is asynchronous and best-effort so startup and command latency are not gated by ADK storage.
 5. Existing Lucy sessions/history remain the source of truth for conversation turns; ADK memory is an additional long-term semantic memory plane.

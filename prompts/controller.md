@@ -55,7 +55,7 @@ Every returned replan subtask MUST contain:
 - `required_observation` — state that must be observed or established;
 - `constraints` — important limits, safety requirements, or read-only requirements.
 
-Do not choose tool names, arguments, coordinates, selectors, IDs, filenames, or other low-level execution details. Those belong to the fast command compiler.
+Do not invent tool names, arguments, coordinates, selectors, IDs, filenames, or other low-level execution details. When a recovery subtask is returned, the runtime will supply the current allowed tool schemas before asking the main model to select the next concrete action.
 
 # Output Contract
 

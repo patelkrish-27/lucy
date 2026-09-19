@@ -16,8 +16,8 @@ impl ToolRegistry {
  pub fn definitions_filtered(&self,allowed:&HashSet<String>)->Vec<Value>{self.tools.values().filter(|t|!t.name().starts_with("mcp_hyprfast_")||allowed.contains(t.name())).map(|t|serde_json::json!({"name":t.name(),"description":t.description(),"input_schema":t.parameters_schema()})).collect()}
  pub fn definitions_for_names(&self,allowed:&HashSet<String>)->Vec<Value>{self.tools.values().filter(|t|allowed.contains(t.name())).map(|t|serde_json::json!({"name":t.name(),"description":t.description(),"input_schema":t.parameters_schema()})).collect()}
  /// Names of built-in local tools (everything not served over MCP).
- /// Used by the hierarchical planner for `files`/`shell` subtasks so the
- /// cheap command model can act on the local machine, not just the desktop.
+ /// Used by the runtime planner for `files`/`shell` subtasks so the
+ /// main model can select local machine tools, not just desktop tools.
  pub fn local_tool_names(&self)->HashSet<String>{self.tools.values().filter(|t|!t.name().starts_with("mcp_")).map(|t|t.name().to_string()).collect()}
  pub async fn execute(&self,name:&str,input:Value,ctx:ToolContext)->Result<Value>{if ctx.interrupt.is_set(){return Err(LucyError::Cancelled.into())}let tool=self.get(name).ok_or_else(||anyhow!(LucyError::ToolNotFound(name.to_string())))?;tool.execute(input,ctx).await}
 }

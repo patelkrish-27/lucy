@@ -1,5 +1,4 @@
-//! Hierarchical planner: main-model triage, cheap-model command compiler,
-//! main-model closed-loop execution with verification and recovery.
+//! Lucy planner: main-model planning, tool selection, verification, and recovery.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -38,14 +37,6 @@ pub(crate) struct Triage {
     pub(crate) reply: Option<String>,
     #[serde(default)]
     pub(crate) subtasks: Vec<SubTask>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct PlannedCommand {
-    pub(crate) tool: String,
-    pub(crate) arguments: Value,
-    #[serde(default)]
-    pub(crate) verify: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -349,7 +340,7 @@ pub(crate) async fn decide_next(
     Ok(decision)
 }
 
-pub(crate) async fn plan_command(
+pub(crate) async fn select_tool(
     provider: &OpenAIProvider,
     model: &str,
     prompt: &str,
@@ -357,19 +348,44 @@ pub(crate) async fn plan_command(
     schemas: &[Value],
     context: &str,
     interrupt: &InterruptSignal,
-) -> Result<PlannedCommand> {
+) -> Result<(String, Value, Option<String>)> {
     let tools = serde_json::to_string(schemas)?;
     let user = ContextBuilder::default()
-        .section("EXACT SUBTASK TO COMPILE", serde_json::to_string(subtask)?)
+        .section("EXACT SUBTASK", serde_json::to_string(subtask)?)
         .section("CURRENT EXECUTION CONTEXT / OBSERVATIONS", context)
         .section("ALLOWED TOOLS AND EXACT SCHEMAS", tools)
-        .section("ORIGINAL USER TASK (context only; do not reinterpret)", prompt)
+        .section("ORIGINAL USER TASK (context only)", prompt)
         .section(
-            "COMPILER RULE",
-            "Use only supplied evidence. If required state is missing and an allowed observation tool exists, choose observation rather than guessing. If a safe batch/macro tool is supplied and the subtask explicitly spans multiple deterministic operations, prefer that single batch command.",
+            "SELECTION RULE",
+            "Use only supplied evidence and the supplied tool schemas. Select exactly one allowed tool and produce arguments that conform to its schema. If required state is missing and an allowed observation tool exists, choose observation rather than guessing. Do not redefine, decompose, or strategically alter the subtask.",
         )
         .finish();
-    parse_with_retry(provider, model, super::prompts::HYPRFAST, &user, interrupt).await
+    let selected: Value = parse_with_retry(
+        provider,
+        model,
+        super::prompts::TOOL_SELECTOR,
+        &user,
+        interrupt,
+    )
+    .await?;
+    let tool = selected
+        .get("tool")
+        .and_then(Value::as_str)
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| anyhow!("main model tool selection did not contain a tool"))?
+        .to_owned();
+    let arguments = selected
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+    if !arguments.is_object() {
+        return Err(anyhow!("main model tool selection arguments must be a JSON object"));
+    }
+    let verify = selected
+        .get("verify")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    Ok((tool, arguments, verify))
 }
 
 pub(crate) fn build_context(

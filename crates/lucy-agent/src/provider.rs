@@ -17,11 +17,8 @@ impl OpenAIProvider {
         cfg.models.main = model.clone();
         cfg.models.api_key = Some(api_key);
         cfg.models.base_url = base_url.clone();
-        // Also populate per-model so cheap inherits same if not overridden
         cfg.models.main_api_key = cfg.models.api_key.clone();
         cfg.models.main_base_url = base_url.clone();
-        cfg.models.cheap_api_key = cfg.models.api_key.clone();
-        cfg.models.cheap_base_url = base_url.clone();
         Ok(Self{client, config: cfg, model: Arc::new(std::sync::RwLock::new(model)), usage: Arc::new(Mutex::new(TokenUsage::default()))})
     }
     pub fn set_model(&self,model:String){if let Ok(mut g)=self.model.write(){*g=model;}}
@@ -31,7 +28,6 @@ impl OpenAIProvider {
         let main_key = cfg.main_api_key().or_else(|| cfg.llm_api_key()).context(
             "Main LLM API key is not set — open Settings (Ctrl+,) set 'Main API Key (OpenChat)' or export OPENCHAT_API_KEY / LUCY_MAIN_API_KEY / OPENAI_API_KEY"
         )?;
-        // Cheap key optional at init — if missing, will error later when cheap model is used
         let _ = main_key;
         let client=Client::builder().timeout(Duration::from_secs(120)).build().context("failed to build HTTP client")?;
         Ok(Self{client, config: cfg.clone(), model: Arc::new(std::sync::RwLock::new(cfg.models.main.clone())), usage: Arc::new(Mutex::new(TokenUsage::default()))})
@@ -54,11 +50,11 @@ impl OpenAIProvider {
         let client=Client::builder().timeout(Duration::from_secs(120)).build().context("failed to build HTTP client")?;
         Ok(Self{client, config: cfg2, model: Arc::new(std::sync::RwLock::new(model)), usage: Arc::new(Mutex::new(TokenUsage::default()))})
     }
-    fn api_key_for(&self, model:&str)->Result<String>{
-        self.config.api_key_for(model).with_context(|| format!("API key for model '{model}' is not set — set via Settings (Main/Cheap API Key) or env OPENCHAT_API_KEY / GEMINI_API_KEY"))
+    fn api_key(&self)->Result<String>{
+        self.config.main_api_key().or_else(|| self.config.llm_api_key()).with_context(|| "Main LLM API key is not set — set it in Lucy Settings or via OPENCHAT_API_KEY / LUCY_MAIN_API_KEY / OPENAI_API_KEY")
     }
-    fn base_url_for(&self, model:&str)->String{
-        self.config.base_url_for(model).unwrap_or_else(|| "https://api.openai.com/v1".to_string())
+    fn base_url(&self)->String{
+        self.config.main_base_url().or_else(|| self.config.llm_base_url()).unwrap_or_else(|| "https://api.openai.com/v1".to_string())
     }
     pub fn usage(&self)->TokenUsage{self.usage.lock().map(|g|g.clone()).unwrap_or_default()}
     pub fn reset_usage(&self){if let Ok(mut g)=self.usage.lock(){*g=TokenUsage::default();}}
@@ -125,8 +121,8 @@ impl OpenAIProvider {
     }
     pub async fn complete_json(&self, model:&str, system:&str, user:&str, interrupt:InterruptSignal)->Result<Value>{
         if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
-        let api_key = self.api_key_for(model)?;
-        let base_url = self.base_url_for(model);
+        let api_key = self.api_key()?;
+        let base_url = self.base_url();
         let payload=json!({"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":user}],"temperature":0,"response_format":{"type":"json_object"}});
         let url=format!("{}/chat/completions",base_url.trim_end_matches('/'));
         if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
@@ -148,8 +144,8 @@ impl ModelProvider for OpenAIProvider {
         for msg in request.history {match msg{TurnMessage::User(text)=>messages.push(json!({"role":"user","content":text})),TurnMessage::Assistant(turn)=>{let mut m=json!({"role":"assistant","content":turn.text});if !turn.tool_calls.is_empty(){m["tool_calls"]=Value::Array(turn.tool_calls.iter().map(|c|json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":serde_json::to_string(&c.input).unwrap_or_else(|_|"{}".into())}})).collect());}messages.push(m)},TurnMessage::Tool(res)=>messages.push(json!({"role":"tool","tool_call_id":res.call_id,"name":res.name,"content":res.output.to_string()}))}}
         let model=self.model();let mut payload=json!({"model":model,"messages":messages});
         if !request.tools.is_empty(){payload["tools"]=json!(request.tools.iter().map(|t|json!({"type":"function","function":{"name":t["name"],"description":t["description"],"parameters":t["input_schema"]}})).collect::<Vec<_>>());}
-        let api_key = self.api_key_for(&model)?;
-        let base_url = self.base_url_for(&model);
+        let api_key = self.api_key()?;
+        let base_url = self.base_url();
         let url=format!("{}/chat/completions",base_url.trim_end_matches('/'));
         if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
         let res=self.post_json(&url,&api_key,&payload,&interrupt).await?;let status=res.status();let body=res.text().await.context("failed to read response body")?;if !status.is_success(){return Err(anyhow!("OpenAI API returned {}: {}",status,Self::truncate_body(&body)));}
