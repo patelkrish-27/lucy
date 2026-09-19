@@ -12,6 +12,9 @@ pub struct McpServerConfig { pub name: String, pub command: String, #[serde(defa
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolDefinition { pub name: String, pub description: Option<String>, pub input_schema: Value }
 
+/// Maximum time to wait for a single MCP response line. Without this a hung
+/// server (e.g. `npx` fetching a package) blocks startup forever.
+const MCP_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 struct Session { child: Child, stdin: ChildStdin, reader: BufReader<tokio::process::ChildStdout> }
 pub struct StdioMcpClient { config: McpServerConfig, session: Mutex<Option<Session>>, next_id: AtomicU64 }
 impl StdioMcpClient {
@@ -21,6 +24,9 @@ impl StdioMcpClient {
         if guard.is_some() { return Ok(()); }
         let mut cmd = tokio::process::Command::new(&self.config.command);
         cmd.args(&self.config.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        // Never leave orphaned MCP children (e.g. `node`) behind when the
+        // client is dropped after a one-shot list_tools() at startup.
+        cmd.kill_on_drop(true);
         for (k, v) in &self.config.env { cmd.env(k, v); }
         let mut child = cmd.spawn().context("failed to spawn MCP server")?;
         let stdin = child.stdin.take().ok_or_else(|| anyhow!("missing MCP stdin"))?;
@@ -56,7 +62,7 @@ async fn write_request(stdin: &mut ChildStdin, id: u64, method: &str, params: Va
     stdin.write_all(format!("{}\n", req).as_bytes()).await?; stdin.flush().await?; Ok(())
 }
 async fn read_response(reader: &mut BufReader<tokio::process::ChildStdout>, id: u64) -> Result<Value> {
-    let mut line = String::new(); loop { line.clear(); if reader.read_line(&mut line).await? == 0 { return Err(anyhow!("MCP server closed stdout")); } let value: Value = serde_json::from_str(line.trim()).context("invalid MCP JSON-RPC response")?; if value.get("id").and_then(Value::as_u64) == Some(id) { if let Some(error) = value.get("error") { return Err(anyhow!("MCP error: {}", error)); } return Ok(value.get("result").cloned().unwrap_or(Value::Null)); } }
+    let mut line = String::new(); loop { line.clear(); let n = tokio::time::timeout(MCP_READ_TIMEOUT, reader.read_line(&mut line)).await.context("MCP server timed out")??; if n == 0 { return Err(anyhow!("MCP server closed stdout")); } let value: Value = serde_json::from_str(line.trim()).context("invalid MCP JSON-RPC response")?; if value.get("id").and_then(Value::as_u64) == Some(id) { if let Some(error) = value.get("error") { return Err(anyhow!("MCP error: {}", error)); } return Ok(value.get("result").cloned().unwrap_or(Value::Null)); } }
 }
 
 struct McpToolProxy { client: Arc<StdioMcpClient>, definition: McpToolDefinition, full_name: String }
@@ -69,9 +75,19 @@ impl Tool for McpToolProxy {
 }
 
 pub async fn register_server(registry: &mut ToolRegistry, config: McpServerConfig) -> Result<usize> {
-    let client = StdioMcpClient::new(config.clone()); let defs = client.list_tools().await?; let mut count = 0;
+    let client = StdioMcpClient::new(config.clone()); let defs = client.list_tools().await?;
+    Ok(register_server_with_defs(registry, config, defs))
+}
+
+/// Register pre-fetched tool definitions WITHOUT spawning the server.
+///
+/// The proxy client connects lazily on the first actual tool call
+/// (`ensure_connected`), so startup pays zero process-spawn cost. Use this
+/// with definitions obtained from discovery or the on-disk defs cache.
+pub fn register_server_with_defs(registry: &mut ToolRegistry, config: McpServerConfig, defs: Vec<McpToolDefinition>) -> usize {
+    let client = StdioMcpClient::new(config.clone()); let mut count = 0;
     for definition in defs { let full_name = format!("mcp_{}_{}", sanitize(&config.name), sanitize(&definition.name)); registry.register_arc(Arc::new(McpToolProxy { client: client.clone(), definition, full_name })); count += 1; }
-    Ok(count)
+    count
 }
 fn sanitize(s: &str) -> String { s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect() }
 
@@ -85,4 +101,23 @@ pub fn load_config() -> Result<Vec<McpServerConfig>> {
     let enabled = std::env::var("LUCY_COMPUTER_USE_ENABLED").map(|v| v != "0" && v.to_ascii_lowercase() != "false").unwrap_or(true);
     if enabled && !servers.iter().any(|s| s.name.eq_ignore_ascii_case("computer_use")) { servers.push(computer_use_config()); }
     Ok(servers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn def(name: &str) -> McpToolDefinition {
+        McpToolDefinition { name: name.into(), description: Some("test tool".into()), input_schema: serde_json::json!({"type": "object"}) }
+    }
+    #[test]
+    fn registers_prefetched_defs_without_spawning() {
+        // Must not spawn anything: command does not exist, so any spawn
+        // attempt would fail. Proxies connect lazily on first execute().
+        let mut registry = lucy_tools::ToolRegistry::new();
+        let config = McpServerConfig { name: "computer_use".into(), command: "definitely-not-a-real-binary-xyz".into(), args: vec![], env: HashMap::new() };
+        let n = register_server_with_defs(&mut registry, config, vec![def("click"), def("type_text")]);
+        assert_eq!(n, 2);
+        assert!(registry.get("mcp_computer_use_click").is_some());
+        assert!(registry.get("mcp_computer_use_type_text").is_some());
+    }
 }

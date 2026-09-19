@@ -10,12 +10,12 @@ pub use planner::SubTask;
 pub use sessions::trim_history;
 use std::{collections::{HashMap, HashSet, VecDeque}, path::PathBuf, sync::Arc};
 use anyhow::{anyhow, Result};
-use lucy_adk::{AdkCapability, LucyAdk, LucySessionService};
+use lucy_adk::{LucyAdk, LucySessionService};
 use lucy_agent::{Agent, OpenAIProvider};
 use lucy_config::LucyConfig;
 use lucy_core::{AgentEvent, ApprovalDecision, ApprovalGate, AssistantTurn, ExecutionMode, InterruptSignal, SessionData, SessionId, TokenUsage, ToolContext, ToolResult, TurnMessage};
 use lucy_hyprfast::HyprFastCatalog;
-use lucy_mcp::{load_config, register_server};
+use lucy_mcp::{load_config, StdioMcpClient};
 use lucy_tools::{default_registry, ToolRegistry};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
@@ -32,18 +32,42 @@ impl LucyRuntime {
     pub async fn new()->Result<Self>{
         let config=LucyConfig::load()?;let provider=Arc::new(OpenAIProvider::from_config(&config)?);let mut registry=default_registry();
         let hf_cfg=lucy_mcp::McpServerConfig{name:"hyprfast".into(),command:config.hyprfast.command.clone(),args:config.hyprfast.args.clone(),env:Default::default()};
-        let hyprfast=match HyprFastCatalog::discover(hf_cfg.clone()).await{Ok(c)=>{tracing::info!(tools=c.len(),"HyprFast MCP connected");let _=c.save().await;Some(c)},Err(e)=>{tracing::warn!(error=%e,"HyprFast MCP unavailable; continuing without desktop capabilities");None}};
-        for server in load_config()?{if server.name.eq_ignore_ascii_case("hyprfast"){continue}if let Err(e)=register_server(&mut registry,server.clone()).await{tracing::warn!(server=%server.name,error=%e,"MCP server unavailable")}}
-        if hyprfast.is_some(){if let Err(e)=register_server(&mut registry,hf_cfg).await{tracing::warn!(error=%e,"failed to register HyprFast MCP tools")}}
         let state_dir=config.sessions.dir.clone().or_else(||std::env::var("LUCY_SESSIONS_DIR").ok().map(PathBuf::from)).unwrap_or_else(||PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".local/state/lucy/sessions"));
         let legacy_path=config.sessions.file.clone().or_else(||std::env::var("LUCY_SESSION_FILE").ok().map(PathBuf::from)).unwrap_or_else(||PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".local/state/lucy/session.json"));
-        let session_service=Arc::new(LucySessionService::open(&state_dir).await?);let _=session_service.import_legacy_file(&legacy_path).await;
+        // Run the independent slow I/O concurrently instead of sequentially:
+        // MCP discovery (spawns server processes), session-store open, and
+        // ADK memory open. Previously these ran one after another, and MCP
+        // discovery alone paid the ~1.4s `npx` handshake twice.
+        let (discover_res, session_open_res, adk_opened) = tokio::join!(
+            HyprFastCatalog::discover_with_definitions(hf_cfg.clone()),
+            LucySessionService::open(&state_dir),
+            LucyAdk::open(&state_dir),
+        );
+        let hyprfast=match discover_res{Ok((c,hf_defs,cu_defs))=>{tracing::info!(tools=c.len(),"HyprFast MCP connected");let _=c.save().await;
+            // Register execution proxies from the ALREADY-FETCHED definitions.
+            // Proxy clients connect lazily on the first real tool call, so
+            // this spawns zero processes. (The old code called
+            // register_server() here, which re-ran a full MCP handshake per
+            // server — including the slow `npx` one — a second time.)
+            let hf_n=lucy_mcp::register_server_with_defs(&mut registry,hf_cfg,hf_defs);
+            let cu_n=if cu_defs.is_empty(){0}else{lucy_mcp::register_server_with_defs(&mut registry,lucy_mcp::computer_use_config(),cu_defs)};
+            tracing::info!(hyprfast_tools=hf_n,computer_use_tools=cu_n,"MCP tools registered");
+            Some(c)},Err(e)=>{tracing::warn!(error=%e,"HyprFast MCP unavailable; continuing without desktop capabilities");None}};
+        // User-configured extra servers still need a live tools/list (their
+        // schemas are not cached). hyprfast/computer_use are already covered
+        // above, so skip them — and probe the rest concurrently instead of
+        // one blocking handshake at a time.
+        let extra_servers=load_config()?.into_iter().filter(|s|!s.name.eq_ignore_ascii_case("hyprfast")&&!s.name.eq_ignore_ascii_case("computer_use")).collect::<Vec<_>>();
+        let mut probing=tokio::task::JoinSet::new();
+        for server in extra_servers{probing.spawn(async move{let name=server.name.clone();let defs=StdioMcpClient::new(server.clone()).list_tools().await;match defs{Ok(d)=>Ok::<_,anyhow::Error>((server,d)),Err(e)=>Err(anyhow!("{name}: {e}") )}});}
+        while let Some(done)=probing.join_next().await{match done.map_err(|e|anyhow!("MCP probe task failed: {e}"))?{Ok((server,defs))=>{let _=lucy_mcp::register_server_with_defs(&mut registry,server,defs);},Err(e)=>tracing::warn!(error=%e,"MCP server unavailable")}}
+        let session_service=Arc::new(session_open_res?);let _=session_service.import_legacy_file(&legacy_path).await;
         let session=session_service.ensure_current(config.sessions.resume).await?;
-        let registry=Arc::new(registry);let agent=Arc::new(Agent::new(provider.clone(),registry.clone()));let(approval_tx,_approval_rx)=mpsc::unbounded_channel();let approvals=ApprovalGate::new(approval_tx);if let Ok(mut m)=approvals.mode.write(){*m=config.approvals.mode.clone()};let adk=Arc::new(LucyAdk::open(&state_dir).await);
+        let registry=Arc::new(registry);let agent=Arc::new(Agent::new(provider.clone(),registry.clone()));let(approval_tx,_approval_rx)=mpsc::unbounded_channel();let approvals=ApprovalGate::new(approval_tx);if let Ok(mut m)=approvals.mode.write(){*m=config.approvals.mode.clone()};let adk=Arc::new(adk_opened);
         Ok(Self{agent,registry,provider,session:Arc::new(Mutex::new(session)),session_service,interrupt:InterruptSignal::new(),working_dir:std::env::current_dir()?,hyprfast,config,approvals,adk})
     }
     pub fn interrupt(&self){self.interrupt.fire()} pub fn hyprfast_catalog(&self)->Option<&HyprFastCatalog>{self.hyprfast.as_ref()} pub fn route_hyprfast(&self,prompt:&str)->Option<lucy_hyprfast::Route>{self.hyprfast.as_ref().map(|c|c.route(prompt))} pub fn config(&self)->&LucyConfig{&self.config} pub fn approval_state(&self)->ApprovalGate{self.approvals.clone()} pub fn resolve_approval(&self,call_id:&str,d:ApprovalDecision)->bool{self.approvals.resolve(call_id,d)} pub fn usage(&self)->TokenUsage{self.provider.usage()}
-    pub fn adk_capabilities(&self)->&'static [AdkCapability]{self.adk.capabilities()} pub fn adk_memory_enabled(&self)->bool{self.adk.memory_enabled()}
+    pub fn adk_memory_enabled(&self)->bool{self.adk.memory_enabled()}
     pub async fn search_memory(&self,query:&str,limit:usize)->Result<Vec<lucy_adk::adk_memory::MemoryEntry>>{self.adk.search_memory(query,limit).await}
     pub async fn remember_fact(&self,fact:&str)->Result<()>{self.adk.remember_fact(fact).await}
     pub fn set_model(&self,model:&str)->anyhow::Result<String>{let name=model.trim().to_owned();if name.is_empty(){return Err(anyhow!("model name must not be empty"))}let mut cfg=LucyConfig::load()?;cfg.models.main=name.clone();cfg.save()?;self.provider.set_model(name.clone());Ok(name)}

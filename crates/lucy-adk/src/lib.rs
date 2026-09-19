@@ -20,13 +20,6 @@ use serde::{Deserialize, Serialize};
 pub use adk_audio;
 pub use adk_core;
 pub use adk_memory;
-pub use adk_rust;
-pub use adk_telemetry;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AdkCapability { PersistentSemanticMemory, SessionServiceBackends, WorkflowAgents, GraphWorkflows, Artifacts, Guardrails, Skills, Plugins, CodeExecution, SandboxedExecution, ComputerUse, RealtimeAgents, AudioPipelines, Evaluation, Telemetry, A2aServer, Authentication, ExpandedModelProviders, McpSamplingAndTransports }
-impl AdkCapability { pub const fn as_str(self)->&'static str { match self { Self::PersistentSemanticMemory=>"persistent-semantic-memory", Self::SessionServiceBackends=>"session-service-backends", Self::WorkflowAgents=>"workflow-agents", Self::GraphWorkflows=>"graph-workflows", Self::Artifacts=>"artifacts", Self::Guardrails=>"guardrails", Self::Skills=>"skills", Self::Plugins=>"plugins", Self::CodeExecution=>"code-execution", Self::SandboxedExecution=>"sandboxed-execution", Self::ComputerUse=>"computer-use", Self::RealtimeAgents=>"realtime-agents", Self::AudioPipelines=>"audio-pipelines", Self::Evaluation=>"evaluation", Self::Telemetry=>"telemetry", Self::A2aServer=>"a2a-server", Self::Authentication=>"authentication", Self::ExpandedModelProviders=>"expanded-model-providers", Self::McpSamplingAndTransports=>"mcp-sampling-and-transports" } } }
-pub const ADK_CAPABILITIES:&[AdkCapability]=&[AdkCapability::PersistentSemanticMemory,AdkCapability::SessionServiceBackends,AdkCapability::WorkflowAgents,AdkCapability::GraphWorkflows,AdkCapability::Artifacts,AdkCapability::Guardrails,AdkCapability::Skills,AdkCapability::Plugins,AdkCapability::CodeExecution,AdkCapability::SandboxedExecution,AdkCapability::ComputerUse,AdkCapability::RealtimeAgents,AdkCapability::AudioPipelines,AdkCapability::Evaluation,AdkCapability::Telemetry,AdkCapability::A2aServer,AdkCapability::Authentication,AdkCapability::ExpandedModelProviders,AdkCapability::McpSamplingAndTransports];
 
 const DEFAULT_MEMORY_RESULTS:usize=6;
 const MAX_MEMORY_CONTEXT_CHARS:usize=6_000;
@@ -46,7 +39,6 @@ impl LucyAdk {
         let sqlite_url=format!("sqlite://{}",memory_path.display());
         match SqliteMemoryService::new(&sqlite_url).await{Ok(service)=>{if let Err(error)=service.migrate().await{tracing::warn!(error=%error,"ADK SQLite memory migration failed; disabling persistent memory");return Self{memory:None,memory_path};}tracing::info!(path=%memory_path.display(),"ADK persistent memory enabled");Self{memory:Some(Arc::new(service)),memory_path}},Err(error)=>{tracing::warn!(error=%error,path=%memory_path.display(),"ADK SQLite memory unavailable; continuing without persistent memory");Self{memory:None,memory_path}}}
     }
-    pub fn capabilities(&self)->&'static [AdkCapability]{ADK_CAPABILITIES}
     pub fn memory_enabled(&self)->bool{self.memory.is_some()}
     pub fn memory_path(&self)->&Path{&self.memory_path}
 
@@ -114,7 +106,6 @@ fn local_user_id()->String{env::var("LUCY_USER_ID").or_else(|_|env::var("USER"))
 
 #[cfg(test)]
 mod tests{use super::*;
-#[test]fn capability_manifest_is_stable(){assert!(ADK_CAPABILITIES.contains(&AdkCapability::PersistentSemanticMemory));assert!(ADK_CAPABILITIES.contains(&AdkCapability::GraphWorkflows));assert!(ADK_CAPABILITIES.contains(&AdkCapability::SandboxedExecution));assert!(ADK_CAPABILITIES.contains(&AdkCapability::Evaluation));assert_eq!(AdkCapability::Telemetry.as_str(),"telemetry");assert!(!ADK_CAPABILITIES.iter().any(|cap|cap.as_str()=="browser-automation"));}
 #[test]fn local_user_has_a_safe_fallback(){assert!(!local_user_id().trim().is_empty());}
 #[test]fn memory_context_budget_is_reasonable(){assert!(MAX_MEMORY_CONTEXT_CHARS>=1_000);}
 #[test]fn transient_requests_are_not_saved(){assert!(curate_interaction("open the browser and search for Rust docs","Done").is_empty());assert!(curate_interaction("what is the capital of France?","Paris").is_empty());}

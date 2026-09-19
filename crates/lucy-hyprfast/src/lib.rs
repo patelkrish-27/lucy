@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use lucy_mcp::{McpServerConfig, McpToolDefinition, StdioMcpClient};
 use serde::{Deserialize, Serialize};
 use std::{collections::{BTreeMap, HashMap, HashSet}, path::PathBuf, process::Command};
@@ -43,7 +43,50 @@ impl HyprFastCatalog {
  pub fn by_domain(&self,domain:Domain)->Vec<&ToolCapability>{self.tools.values().filter(|t|t.domain==domain).collect()}
  pub fn summary(&self)->BTreeMap<String,usize>{let mut out=BTreeMap::new();for tool in self.tools.values(){*out.entry(format!("{:?}",tool.domain)).or_insert(0)+=1;}out}
  pub fn capability_for_mcp_name(&self,name:&str)->Option<&ToolCapability>{self.tools.values().find(|tool|full_name(&tool.name)==name||tool.name==name)}
- pub async fn discover(config:McpServerConfig)->Result<Self>{let client=StdioMcpClient::new(config);let mut tools=client.list_tools().await.context("failed to discover HyprFast MCP tools")?;if std::env::var("LUCY_COMPUTER_USE_ENABLED").map(|v|v!="0"&&v.to_ascii_lowercase()!="false").unwrap_or(true){let computer=StdioMcpClient::new(computer_use_config());match computer.list_tools().await{Ok(defs)=>{for mut d in defs{d.name=format!("computer_use_{}",d.name);tools.push(d);}tracing::info!("ADK Computer Use MCP merged into capability catalog");},Err(error)=>tracing::warn!(error=%error,"ADK Computer Use unavailable; continuing with HyprFast only")}}Ok(Self::from_tools(tools))}
+ pub async fn discover(config:McpServerConfig)->Result<Self>{Ok(Self::discover_with_definitions(config).await?.0)}
+  /// Discover the catalog AND return the raw tool definitions behind it.
+  ///
+  /// The `npx`-spawned Computer Use server costs ~1.4s per handshake, so its
+  /// definitions are served from an on-disk cache while fresh (default TTL
+  /// 24h, `LUCY_MCP_DEFS_TTL_SECS`, `0` = always refresh). The fast native
+  /// `hyprfast` server (~8ms) is always fetched live. Both fetches run
+  /// concurrently, and a stale cache is used as fallback when a live fetch
+  /// fails, so startup stays in the millisecond range in the common case.
+  pub async fn discover_with_definitions(config:McpServerConfig)->Result<(Self,Vec<McpToolDefinition>,Vec<McpToolDefinition>)>{
+    let stale_cache = load_cached_defs();
+    let fresh_cache = stale_cache.clone().filter(|c| !defs_cache_stale(c));
+    let hyprfast_client = StdioMcpClient::new(config);
+    let (hyprfast_res, computer_res) = tokio::join!(
+      hyprfast_client.list_tools(),
+      resolve_computer_use_defs(fresh_cache.as_ref().map(|c| c.computer_use.clone())),
+    );
+    let hyprfast_defs = match hyprfast_res {
+      Ok(defs) => defs,
+      Err(error) => match stale_cache.as_ref().map(|c| c.hyprfast.clone()).filter(|d| !d.is_empty()) {
+        Some(defs) => { tracing::warn!(error=%error, "HyprFast MCP unavailable; using cached tool definitions"); defs }
+        None => return Err(error.context("failed to discover HyprFast MCP tools")),
+      },
+    };
+    let computer_live_ok = computer_res.is_ok();
+    let computer_defs = match computer_res {
+      Ok(defs) => defs,
+      Err(error) => match stale_cache.as_ref().map(|c| c.computer_use.clone()).filter(|d| !d.is_empty()) {
+        Some(defs) => { tracing::warn!(error=%error, "ADK Computer Use unavailable; using cached tool definitions"); defs }
+        None => { tracing::warn!(error=%error, "ADK Computer Use unavailable; continuing with HyprFast only"); Vec::new() }
+      },
+    };
+    // Toll the slow path only when we actually paid it: persist defs fetched
+    // live so the next startup can skip the `npx` spawn entirely. A failed
+    // live fetch must NOT refresh the timestamp, or a transient failure would
+    // pin stale defs as "fresh" for a full TTL.
+    if fresh_cache.is_none() && computer_use_enabled() && computer_live_ok {
+      save_cached_defs(&hyprfast_defs, &computer_defs).await;
+    }
+    let mut tools = hyprfast_defs.clone();
+    for def in &computer_defs { let mut d = def.clone(); d.name = format!("computer_use_{}", d.name); tools.push(d); }
+    if !computer_defs.is_empty() { tracing::info!(computer_use = computer_defs.len(), "ADK Computer Use MCP merged into capability catalog"); }
+    Ok((Self::from_tools(tools), hyprfast_defs, computer_defs))
+  }
  pub async fn discover_default()->Result<Self>{Self::discover(default_config()).await}
  pub fn cache_path()->PathBuf{std::env::var("LUCY_HYPRFAST_CACHE").map(PathBuf::from).unwrap_or_else(|_|PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".local/state/lucy/hyprfast-catalog.json"))}
  pub async fn save(&self)->Result<()>{let path=Self::cache_path();if let Some(parent)=path.parent(){tokio::fs::create_dir_all(parent).await?;}tokio::fs::write(path,serde_json::to_vec_pretty(self)?).await?;Ok(())}
@@ -63,6 +106,31 @@ fn strategy_for(text:&str)->String{if text.contains("screenshot")||text.contains
 fn is_fast_path(text:&str)->bool{["screenshot","take a screenshot","open firefox","open chrome","launch firefox","launch chrome"].iter().any(|x|text.trim()==*x)}
 pub fn default_config()->McpServerConfig{McpServerConfig{name:"hyprfast".into(),command:"hyprfast".into(),args:vec!["mcp".into()],env:Default::default()}}
 pub fn computer_use_config()->McpServerConfig{McpServerConfig{name:"computer_use".into(),command:std::env::var("LUCY_COMPUTER_USE_COMMAND").unwrap_or_else(|_|"npx".into()),args:std::env::var("LUCY_COMPUTER_USE_ARGS").map(|v|v.split_whitespace().map(str::to_owned).collect()).unwrap_or_else(|_|vec!["-y".into(),"@zavora-ai/computer-use-mcp".into()]),env:Default::default()}}
+pub fn computer_use_enabled()->bool{std::env::var("LUCY_COMPUTER_USE_ENABLED").map(|v|v!="0"&&v.to_ascii_lowercase()!="false").unwrap_or(true)}
+
+/// Raw MCP tool definitions cached on disk so startup can skip spawning the
+/// slow `npx` Computer Use server on every run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedToolDefs { saved_at_secs: u64, hyprfast: Vec<McpToolDefinition>, computer_use: Vec<McpToolDefinition> }
+/// Default 24h. `LUCY_MCP_DEFS_TTL_SECS=0` forces a live refresh every run.
+const DEFAULT_DEFS_TTL_SECS: u64 = 24 * 3600;
+fn defs_cache_path()->PathBuf{std::env::var("LUCY_MCP_DEFS_CACHE").map(PathBuf::from).unwrap_or_else(|_|PathBuf::from(std::env::var("HOME").unwrap_or_else(|_|".".into())).join(".local/state/lucy/mcp-tool-defs.json"))}
+fn defs_cache_ttl_secs()->u64{std::env::var("LUCY_MCP_DEFS_TTL_SECS").ok().and_then(|v|v.parse().ok()).unwrap_or(DEFAULT_DEFS_TTL_SECS)}
+fn now_secs()->u64{std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d|d.as_secs()).unwrap_or(0)}
+fn defs_cache_stale(cache:&CachedToolDefs)->bool{let ttl=defs_cache_ttl_secs();if ttl==0{return true;}now_secs().saturating_sub(cache.saved_at_secs) > ttl}
+fn load_cached_defs()->Option<CachedToolDefs>{let path=defs_cache_path();let data=std::fs::read(path).ok()?;serde_json::from_slice(&data).ok()}
+async fn save_cached_defs(hyprfast:&[McpToolDefinition],computer_use:&[McpToolDefinition]){let cache=CachedToolDefs{saved_at_secs:now_secs(),hyprfast:hyprfast.to_vec(),computer_use:computer_use.to_vec()};let path=defs_cache_path();if let Some(parent)=path.parent(){if tokio::fs::create_dir_all(parent).await.is_err(){return;}}if let Ok(data)=serde_json::to_vec(&cache){if tokio::fs::write(path,data).await.is_ok(){tracing::info!("saved MCP tool-definition cache");}}}
+/// Resolve Computer Use defs: disabled -> empty, fresh cache -> cache hit (no
+/// spawn), otherwise one live `npx` handshake.
+async fn resolve_computer_use_defs(cached:Option<Vec<McpToolDefinition>>)->Result<Vec<McpToolDefinition>>{
+  if !computer_use_enabled(){return Ok(Vec::new());}
+  if let Some(defs)=cached{ if !defs.is_empty(){tracing::info!(tools=defs.len(),"using cached Computer Use tool definitions");return Ok(defs);} }
+  Ok(StdioMcpClient::new(computer_use_config()).list_tools().await?)
+}
 fn classify(tool:&McpToolDefinition)->ToolCapability{let name=tool.name.to_ascii_lowercase();let desc=tool.description.clone().unwrap_or_default().to_ascii_lowercase();let text=format!("{} {}",name,desc);let domain=if has(&text,&["browser_","browser "]){Domain::Browser}else if has(&text,&["stagehand"]){Domain::Stagehand}else if has(&text,&["hint_"]){Domain::Hints}else if has(&text,&["screenshot","ground","vision"]){if name.starts_with("computer_use_"){Domain::Desktop}else{Domain::Vision}}else if has(&text,&["clipboard"]){Domain::Clipboard}else if has(&text,&["excalidraw"]){Domain::Excalidraw}else if has(&text,&["task_"]){Domain::Tasks}else if has(&text,&["computer_use_","computer use","hypr","desktop","window","pointer","keyboard","click_ui","ui_","application","menu","form"]){Domain::Desktop}else{Domain::System};let mut capabilities=Vec::new();for(terms,cap)in[(&["screenshot","observe","read","inspect","query"][..],Capability::Observe),(&["click","press"][..],Capability::Click),(&["type","fill"][..],Capability::Type),(&["keyboard","key_"][..],Capability::Keyboard),(&["pointer","mouse"][..],Capability::Pointer),(&["window","workspace","space"][..],Capability::Window),(&["launch","open_application","discover_application"][..],Capability::Launch),(&["navigate","goto","url"][..],Capability::Navigate),(&["extract","text","content","element"][..],Capability::Extract),(&["act","action"][..],Capability::Act),(&["batch"][..],Capability::Batch),(&["task_"][..],Capability::Task),(&["clipboard"][..],Capability::Clipboard),(&["excalidraw","draw"][..],Capability::Draw),(&["wait"][..],Capability::Wait),(&["bind"][..],Capability::Bindings),(&["ground"][..],Capability::Ground)]{if has(&text,terms){capabilities.push(cap)}}if capabilities.is_empty(){capabilities.push(Capability::Unknown)}let read_only=matches!(domain,Domain::Vision)||has(&text,&["screenshot","inspect","get","list","find","query","focused","frontmost"]);let destructive=has(&text,&["close","kill","delete","remove","destroy","shutdown","logout"]);let batchable=has(&text,&["batch","act_fast"]);let operation=if read_only{Operation::Observe}else if has(&text,&["list","get","find","query","screenshot"]){Operation::Query}else if has(&text,&["draw","clipboard","task_"]){Operation::Manage}else if has(&text,&["extract","ground"]){Operation::Transform}else{Operation::Act};let semantic=has(&text,&["accessibility","semantic","element","button","form","menu","ui tree","application","window"]);ToolCapability{name:tool.name.clone(),description:tool.description.clone().unwrap_or_default(),input_schema:tool.input_schema.clone(),domain,capabilities,operation,read_only,destructive,batchable,semantic}}
 fn has(text:&str,terms:&[&str])->bool{terms.iter().any(|term|text.contains(term))}
 #[cfg(test)]mod tests{use super::*;fn tool(name:&str,description:&str)->McpToolDefinition{McpToolDefinition{name:name.into(),description:Some(description.into()),input_schema:serde_json::json!({"type":"object"})}}#[test]fn categorizes_tools(){let c=HyprFastCatalog::from_tools(vec![tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("act_batch","execute batch"),tool("task_init","start task")]);assert_eq!(c.tools["browser_click"].domain,Domain::Browser);assert!(c.tools["browser_click"].capabilities.contains(&Capability::Click));assert_eq!(c.tools["screenshot"].domain,Domain::Vision);assert!(c.tools["act_batch"].batchable);assert_eq!(c.tools["task_init"].domain,Domain::Tasks);}#[test]fn routes_browser_click(){let c=HyprFastCatalog::from_tools(vec![tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("desktop_window","move workspace window")]);let r=c.route("click the browser button");assert!(r.candidates.iter().any(|x|x.contains("browser_click")));assert_eq!(r.strategy,"hint-first");}#[test]fn routes_play_song_to_browser_tools(){let c=HyprFastCatalog::from_tools(vec![tool("browser_launch","launch browser"),tool("browser_navigate","navigate browser to url"),tool("browser_click","click browser element"),tool("screenshot","capture desktop"),tool("read_file","read a file")]);let r=c.route("play sammi meri waar song");assert!(r.candidates.iter().any(|x|x.contains("browser_navigate")),"play-song must route to browser tools, got {:?}",r.candidates);}#[test]fn domain_route_does_not_offer_launch_for_youtube_flow(){let c=HyprFastCatalog::from_tools(vec![tool("browser_launch","launch browser"),tool("browser_navigate","navigate browser to url"),tool("browser_click","click browser element"),tool("browser_type","type into browser"),tool("browser_snapshot","observe browser")]);let r=c.route_domain("browser","navigate to YouTube and search for Boom Shaka Laka");assert!(!r.candidates.iter().any(|x|x.contains("browser_launch")));assert!(r.candidates.iter().any(|x|x.contains("browser_navigate")));}#[test]fn domain_route_allows_explicit_browser_launch(){let c=HyprFastCatalog::from_tools(vec![tool("browser_launch","launch browser"),tool("browser_navigate","navigate browser to url")]);let r=c.route_domain("browser","launch browser");assert!(r.candidates.iter().any(|x|x.contains("browser_launch")));}#[test]fn routes_desktop_semantically(){let c=HyprFastCatalog::from_tools(vec![tool("computer_use_find_element","find accessibility element"),tool("computer_use_press_button","press a button"),tool("computer_use_left_click","click coordinates")]);let r=c.route_domain("desktop","click the Save button");assert!(r.candidates.iter().any(|x|x.contains("mcp_computer_use_press_button")));assert_eq!(r.strategy,"accessibility-first");}}
+#[cfg(test)]mod cache_tests{use super::*;
+#[test]fn computer_use_toggle_defaults_on(){unsafe{std::env::remove_var("LUCY_COMPUTER_USE_ENABLED")};assert!(computer_use_enabled());unsafe{std::env::set_var("LUCY_COMPUTER_USE_ENABLED","0")};assert!(!computer_use_enabled());unsafe{std::env::set_var("LUCY_COMPUTER_USE_ENABLED","false")};assert!(!computer_use_enabled());unsafe{std::env::remove_var("LUCY_COMPUTER_USE_ENABLED")};}
+#[test]fn defs_cache_freshness_follows_ttl(){unsafe{std::env::remove_var("LUCY_MCP_DEFS_TTL_SECS")};let fresh=CachedToolDefs{saved_at_secs:now_secs(),hyprfast:vec![],computer_use:vec![]};assert!(!defs_cache_stale(&fresh));let ancient=CachedToolDefs{saved_at_secs:0,hyprfast:vec![],computer_use:vec![]};assert!(defs_cache_stale(&ancient));unsafe{std::env::set_var("LUCY_MCP_DEFS_TTL_SECS","0")};assert!(defs_cache_stale(&fresh));unsafe{std::env::remove_var("LUCY_MCP_DEFS_TTL_SECS")};}
+#[test]fn defs_cache_roundtrip(){let dir=std::env::temp_dir().join(format!("lucy-defs-cache-{}",now_secs()));std::fs::create_dir_all(&dir).unwrap();let path=dir.join("defs.json");unsafe{std::env::set_var("LUCY_MCP_DEFS_CACHE",path.to_str().unwrap())};assert!(load_cached_defs().is_none());let defs=vec![McpToolDefinition{name:"click".into(),description:None,input_schema:serde_json::json!({})}];let rt=tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();rt.block_on(save_cached_defs(&[],&defs));let loaded=load_cached_defs().expect("cache should exist after save");assert!(!defs_cache_stale(&loaded));assert_eq!(loaded.computer_use.len(),1);assert_eq!(loaded.computer_use[0].name,"click");unsafe{std::env::remove_var("LUCY_MCP_DEFS_CACHE")};let _=std::fs::remove_dir_all(dir);}}
