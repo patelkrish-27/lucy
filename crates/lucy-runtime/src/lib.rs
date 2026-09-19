@@ -19,7 +19,7 @@ use lucy_mcp::{load_config, StdioMcpClient};
 use lucy_tools::{default_registry, ToolRegistry};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
-use planner::{action_requires_verification, build_context, decide_next, plan_command, triage_request, truncate_json, validate_plan, validate_replanned_subtask, verification_subtask, select_tool, DecisionKind};
+use planner::{action_requires_verification, build_context, decide_next, triage_request, truncate_json, validate_plan, validate_replanned_subtask, verification_subtask, select_tool, DecisionKind};
 use sessions::now;
 const MAX_CONTEXT_CHARS: usize = 16_000;
 const MAX_ACTIONS: usize = 64;
