@@ -28,7 +28,6 @@ impl OpenAIProvider {
         let main_key = cfg.main_api_key().or_else(|| cfg.llm_api_key()).context(
             "Main LLM API key is not set — open Settings (Ctrl+,) set 'Main API Key (OpenChat)' or export OPENCHAT_API_KEY / LUCY_MAIN_API_KEY / OPENAI_API_KEY"
         )?;
-        // Cheap key optional at init — if missing, will error later when cheap model is used
         let _ = main_key;
         let client=Client::builder().timeout(Duration::from_secs(120)).build().context("failed to build HTTP client")?;
         Ok(Self{client, config: cfg.clone(), model: Arc::new(std::sync::RwLock::new(cfg.models.main.clone())), usage: Arc::new(Mutex::new(TokenUsage::default()))})
