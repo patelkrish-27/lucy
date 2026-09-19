@@ -80,11 +80,6 @@ impl LucyConfig {
                 if !v.trim().is_empty(){ self.models.main_base_url=Some(v); }
             }
         }
-        if self.models.cheap_base_url.is_none(){
-            if let Ok(v)=env::var("GEMINI_BASE_URL").or_else(|_| env::var("LUCY_CHEAP_BASE_URL")).or_else(|_| env::var("CHEAP_BASE_URL")).or_else(|_| env::var("LUCY_HYPRFAST_BASE_URL")){
-                if !v.trim().is_empty(){ self.models.cheap_base_url=Some(v); }
-            }
-        }
         // Generic LLM API key: accept any brand via endpoint + key. Priority: config file > env
         if self.models.api_key.is_none(){
             for key in ["LUCY_API_KEY","OPENAI_API_KEY","ANTHROPIC_API_KEY","GEMINI_API_KEY","LLM_API_KEY","MISTRAL_API_KEY","OPENROUTER_API_KEY"]{
@@ -127,7 +122,7 @@ impl LucyConfig {
             env::var("OPENAI_BASE_URL").ok().filter(|v|!v.is_empty()).or_else(||env::var("LLM_BASE_URL").ok()).or_else(||env::var("LUCY_BASE_URL").ok())
         })
     }
-    /// Per-model helpers — main (OpenChat) and cheap (Gemini)
+    /// Main-model configuration helpers.
     pub fn main_api_key(&self)->Option<String>{
         self.models.main_api_key.clone().filter(|v|!v.trim().is_empty()).or_else(||{
             for key in ["LUCY_MAIN_API_KEY","OPENCHAT_API_KEY","OPENAI_API_KEY"]{
@@ -180,7 +175,7 @@ pub fn doctor()->Vec<(&'static str,bool,String)>{
                 let mut last_err="connection failed".to_string();for a in addrs{match TcpStream::connect_timeout(&a,Duration::from_secs(3)){Ok(s)=>{drop(s);return " — reachable".into()},Err(e)=>{last_err=e.to_string();}}}
                 trunc(last_err)
             };
-            let main_reach=reachability(&main_endpoint);let cheap_reach=reachability(&cheap_endpoint);
+            let main_reach=reachability(&main_endpoint);
             let main_detail = if main_ok { format!("set {} — endpoint {}", mask(main_key.unwrap()), main_endpoint) } else { "missing — Settings > Main API Key (OpenChat) or env OPENCHAT_API_KEY / LUCY_MAIN_API_KEY".into() };
             vec![
                 ("Config",true,LucyConfig::path().map(|p|p.display().to_string()).unwrap_or_default()),
