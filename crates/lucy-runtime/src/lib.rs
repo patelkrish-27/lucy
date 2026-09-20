@@ -1,30 +1,36 @@
 //! Lucy runtime: combines the latency-sensitive Lucy execution engine with
 //! optional ADK-Rust extension services.
 mod execution;
+mod harness;
 mod memory;
 mod planner;
 mod prompts;
 mod sessions;
 pub use execution::{build_waves, has_dependency_cycle, parallel_candidate, ExecutionWave};
+pub use harness::{
+    browser_candidates, capability_summary_line, cdp_port_responds, deterministic_recovery,
+    has_debug_flag, name_looks_like_launch, name_looks_like_observation, parse_router_envelope,
+    parse_verifier, preflight_browser, preflight_for_domains, validate_recovery_calls,
+    validate_tool_plan, verifier_user_message, CallBudget, ExecutionTrace, GoalObject,
+    PreflightState, RecoveryFix, StepResult, VerifierDecision,
+};
 pub use planner::SubTask;
 pub use sessions::trim_history;
-use std::{collections::{HashMap, HashSet, VecDeque}, path::PathBuf, sync::Arc};
+use std::{collections::{HashMap, HashSet}, path::PathBuf, sync::Arc};
 use anyhow::{anyhow, Result};
+use harness::{recovery_user_message, validate_tool_plan as validate_plan_calls};
 use lucy_adk::{LucyAdk, LucySessionService};
 use lucy_agent::{Agent, OpenAIProvider};
 use lucy_config::LucyConfig;
-use lucy_core::{AgentEvent, ApprovalDecision, ApprovalGate, AssistantTurn, ExecutionMode, InterruptSignal, SessionData, SessionId, TokenUsage, ToolContext, ToolResult, TurnMessage};
+use lucy_core::{AgentEvent, ApprovalDecision, ApprovalGate, AssistantTurn, ExecutionMode, InterruptSignal, SessionData, SessionId, TokenUsage, ToolCall, ToolContext, ToolResult, TurnMessage};
 use lucy_hyprfast::HyprFastCatalog;
 use lucy_mcp::{load_config, StdioMcpClient};
 use lucy_tools::{default_registry, ToolRegistry};
 use serde_json::Value;
 use tokio::sync::{mpsc, Mutex};
-use planner::{action_requires_verification, build_context, decide_next, triage_request, truncate_json, validate_plan, validate_replanned_subtask, verification_subtask, select_tool, DecisionKind};
 use sessions::now;
 const MAX_CONTEXT_CHARS: usize = 16_000;
 const MAX_ACTIONS: usize = 64;
-const MAX_MAIN_DECISIONS: usize = 12;
-const MAX_REPLANS: usize = 8;
 
 /// Runtime session cache. Persistence and history authority live exclusively in ADK SessionService.
 pub struct LucyRuntime { agent:Arc<Agent<OpenAIProvider>>, registry:Arc<ToolRegistry>, provider:Arc<OpenAIProvider>, session:Arc<Mutex<SessionData>>, session_service:Arc<LucySessionService>, interrupt:InterruptSignal, working_dir:PathBuf, hyprfast:Option<HyprFastCatalog>, config:LucyConfig, approvals:ApprovalGate, adk:Arc<LucyAdk> }
@@ -80,29 +86,374 @@ impl LucyRuntime {
         let(tx,rx)=mpsc::unbounded_channel();let session_service=self.session_service.clone();let session_store=self.session.clone();let max_history=self.config.sessions.max_history;let owner_id=session_snapshot.session_id.clone();let adk=self.adk.clone();let provider=self.provider.clone();let interrupt=self.interrupt.clone();
         tokio::spawn(async move{let mut source=source;let mut last_assistant_text=None::<String>;while let Some(event)=source.recv().await{if let AgentEvent::History{message}=&event{if let TurnMessage::Assistant(turn)=message{if let Some(text)=turn.text.clone(){if !text.trim().is_empty(){last_assistant_text=Some(text);}}}let event_result=adk_event_for_turn(message);let mut session=session_store.lock().await;if session.session_id==owner_id{session.history.push(message.clone());trim_history(&mut session.history,max_history);session.updated_at=now();}let _=session_service.save_event(&owner_id,event_result).await;}let _=tx.send(event);}if let Some(text)=last_assistant_text{let adk=adk.clone();let provider=provider.clone();let prompt=memory_prompt.clone();let interrupt=interrupt.clone();tokio::spawn(async move{if let Err(error)=memory::extract_and_store(provider,adk,&prompt,&text,interrupt).await{tracing::debug!(error=%error,"ADK memory extraction skipped");}});}});Ok(rx)
     }
+    /// Harness v2 (`docs/lucy-harness-architecture.md`): one Router+Planner
+    /// call with native `tool_calls`, deterministic preflight + recovery in
+    /// code (0 LLM calls), and one terminal Verifier call. Budget: 2 calls
+    /// healthy, 3–4 with one genuine deviation.
     async fn plan_and_execute(&self,prompt:String,history:Vec<TurnMessage>,route:Option<lucy_hyprfast::Route>)->Result<mpsc::UnboundedReceiver<AgentEvent>>{
-        let(tx,rx)=mpsc::unbounded_channel();let provider=self.provider.clone();let registry=self.registry.clone();let catalog=self.hyprfast.clone().ok_or_else(||anyhow!("HyprFast catalog unavailable"))?;let interrupt=self.interrupt.clone();let working_dir=self.working_dir.clone();let planner_cfg=self.config.planner.clone();let verify_actions=self.config.hyprfast.verify_actions;let main_model=self.provider.model();let approvals=self.approvals.clone();
+        let(tx,rx)=mpsc::unbounded_channel();let provider=self.provider.clone();let registry=self.registry.clone();let catalog=self.hyprfast.clone().ok_or_else(||anyhow!("HyprFast catalog unavailable"))?;let interrupt=self.interrupt.clone();let working_dir=self.working_dir.clone();let browser_cfg=self.config.browser.clone();let harness_cfg=self.config.harness.clone();let main_model=self.provider.model();let approvals=self.approvals.clone();let fallback_agent=self.agent.clone();let fallback_working_dir=self.working_dir.clone();let fallback_interrupt=self.interrupt.clone();
         tokio::spawn(async move{let run=async{
-            let _=tx.send(AgentEvent::History{message:TurnMessage::User(prompt.clone())});let _=tx.send(AgentEvent::Status{message:"Understanding your request…".into()});let triage=triage_request(&provider,&main_model,&prompt,&catalog,&route,&history,&interrupt).await?;
-            if triage.mode=="chat"{let text=triage.reply.filter(|r|!r.trim().is_empty()).unwrap_or_else(||"Done.".to_string());let assistant=TurnMessage::Assistant(AssistantTurn{text:Some(text.clone()),tool_calls:Vec::new()});let _=tx.send(AgentEvent::History{message:assistant});let _=tx.send(AgentEvent::TextDelta{text});return Ok::<(),anyhow::Error>(());}
-            if triage.mode!="act"{return Err(anyhow!("main model returned unknown triage mode: {}",triage.mode));}if triage.subtasks.is_empty()||triage.subtasks.len()>planner_cfg.max_subtasks{return Err(anyhow!("main model returned an invalid subtask count"));}validate_plan(&triage.subtasks)?;
-            let _=tx.send(AgentEvent::Progress{message:format!("Plan ready: {} step{}…",triage.subtasks.len(),if triage.subtasks.len()==1{""}else{"s"})});let mut queue:VecDeque<SubTask>=triage.subtasks.into_iter().collect();let mut completed:HashMap<String,Value>=HashMap::new();let mut notes=Vec::new();let mut seen_actions=HashSet::<String>::new();let mut seen_failures=HashSet::<String>::new();let mut decisions=0usize;let mut replans=0usize;let mut actions=0usize;let mut done_count=0usize;let mut deferred=0usize;
-            while let Some(subtask)=queue.pop_front(){if interrupt.is_set(){return Err(lucy_core::LucyError::Cancelled.into());}if actions>=MAX_ACTIONS{return Err(anyhow!("computer-operation action budget exhausted; stopping to prevent a loop"));}if !subtask.depends_on.iter().all(|id|completed.contains_key(id)){queue.push_back(subtask);deferred+=1;if deferred>=queue.len().max(1){return Err(anyhow!("execution plan is blocked by unresolved dependencies"));}continue;}deferred=0;
-                let step_no=done_count+1;let _=tx.send(AgentEvent::Status{message:format!("Step {step_no}: {}",subtask.goal)});let _=tx.send(AgentEvent::Progress{message:format!("Step {step_no}: {}",subtask.goal)});let cat=subtask.category.to_ascii_lowercase();
-                let(allowed,context)=if cat=="files"||cat=="shell"||cat=="system"{let names=registry.local_tool_names();if names.is_empty(){return Err(anyhow!("no local tools available for subtask: {}",subtask.goal));}let mut ctx=String::from("Local machine tools. Prefer read-only observation tools when only inspecting; never invent file contents or command output.\n");for id in &subtask.depends_on{if let Some(v)=completed.get(id){ctx.push_str(&format!("\nDependency {id} result: {v}"));}}if ctx.len()>MAX_CONTEXT_CHARS{ctx.truncate(MAX_CONTEXT_CHARS);ctx.push_str("\n[context truncated]");}(names,ctx)}else{let subroute=catalog.route_domain(&subtask.category,&subtask.goal);let names:HashSet<String>=subroute.candidates.iter().cloned().collect();if names.is_empty(){return Err(anyhow!("no HyprFast tools matched subtask: {}",subtask.goal));}let ctx=build_context(&catalog,&subroute,&completed,&subtask.depends_on);(names,ctx)};
-                let schemas=registry.definitions_for_names(&allowed);let (tool,arguments,explicit_verify)=select_tool(&provider,&main_model,&prompt,&subtask,&schemas,&context,&interrupt).await?;if !allowed.contains(&tool){return Err(anyhow!("main model selected tool outside routed capability set: {}",tool));}if !arguments.is_object(){return Err(anyhow!("main model tool arguments must be a JSON object"));}
-                let action_key=format!("{}|{}|{}",subtask.goal.trim(),tool,arguments);if !seen_actions.insert(action_key){return Err(anyhow!("repeated identical action detected; stopping to prevent an execution loop"));}actions+=1;let call_id=format!("plan-{actions}");let gate=approvals.with_events(tx.clone());
-                if gate.needs_approval(&tool,registry.requires_approval(&tool)){let _=tx.send(AgentEvent::Progress{message:format!("Needs your approval: {}…",tool)});match gate.ask(&call_id,&tool,&arguments).await{ApprovalDecision::AllowOnce|ApprovalDecision::AllowAlways=>{},ApprovalDecision::Deny=>{let denied=serde_json::json!({"denied by user":tool.clone()});let _=tx.send(AgentEvent::ToolFinished{id:call_id.clone(),name:tool.clone(),output:denied.clone(),is_error:true});if !planner_cfg.replan_on_failure{return Err(anyhow!("subtask denied: {}",subtask.goal));}if replans>=MAX_REPLANS{return Err(anyhow!("recovery budget exhausted after approval denial"));}replans+=1;let fingerprint=format!("deny|{}|{}",subtask.goal,tool);if !seen_failures.insert(fingerprint){return Err(anyhow!("repeated denied action detected; stopping recovery loop"));}completed.insert(format!("{}_failure",subtask.id),denied.clone());if decisions>=MAX_MAIN_DECISIONS{return Err(anyhow!("main-model recovery decision budget exhausted"));}decisions+=1;let decision=decide_next(&provider,&main_model,&prompt,&queue,&completed,&subtask,&denied,&catalog,&interrupt).await?;if let Some(s)=decision.subtask{validate_replanned_subtask(&s,&completed,&queue)?;queue.push_front(s);}continue;}}}
-                let _=tx.send(AgentEvent::ToolStarted{id:call_id.clone(),name:tool.clone(),input:arguments.clone()});let ctx=ToolContext{session_id:SessionId::default(),tool_call_id:call_id.clone(),working_dir:Some(working_dir.clone()),execution_mode:ExecutionMode::Agent,events:tx.clone(),interrupt:interrupt.clone()};let result=registry.execute(&tool,arguments.clone(),ctx).await;
-                let output=match result{Ok(v)=>{let _=tx.send(AgentEvent::ToolFinished{id:call_id.clone(),name:tool.clone(),output:v.clone(),is_error:false});v},Err(e)=>{let err=serde_json::json!({"error":e.to_string()});let _=tx.send(AgentEvent::ToolFinished{id:call_id.clone(),name:tool.clone(),output:err.clone(),is_error:true});if !planner_cfg.replan_on_failure{return Err(anyhow!("subtask failed: {}: {}",subtask.goal,e));}if replans>=MAX_REPLANS{return Err(anyhow!("recovery budget exhausted after repeated failures"));}let fingerprint=format!("failure|{}|{}|{}",subtask.goal,tool,e);if !seen_failures.insert(fingerprint){return Err(anyhow!("same action failed repeatedly; stopping instead of looping"));}replans+=1;let _=tx.send(AgentEvent::Progress{message:format!("Step failed ({e}) — replanning…")});completed.insert(format!("{}_failure",subtask.id),err.clone());if decisions>=MAX_MAIN_DECISIONS{return Err(anyhow!("main-model recovery decision budget exhausted"));}decisions+=1;let decision=decide_next(&provider,&main_model,&prompt,&queue,&completed,&subtask,&err,&catalog,&interrupt).await?;if let Some(s)=decision.subtask{validate_replanned_subtask(&s,&completed,&queue)?;queue.push_front(s);}continue;}};
-                let state=truncate_json(output.clone());completed.insert(subtask.id.clone(),state.clone());notes.push(subtask.goal.clone());done_count+=1;let _=tx.send(AgentEvent::History{message:TurnMessage::Tool(ToolResult{call_id,name:tool.clone(),output:state.clone(),is_error:false})});let must_verify=verify_actions&&planner_cfg.verify_state&&action_requires_verification(&catalog,&tool,&subtask.category,explicit_verify.is_some())&&!subtask.id.starts_with("verify-");
-                if must_verify{let _=tx.send(AgentEvent::Status{message:"Verifying the result…".into()});let _=tx.send(AgentEvent::Progress{message:"Verifying the result…".into()});queue.push_front(verification_subtask(&catalog,&tool,&subtask.goal,&subtask.category,decisions+1));continue;}
-                if subtask.id.starts_with("verify-"){if decisions>=MAX_MAIN_DECISIONS{return Err(anyhow!("main-model verification decision budget exhausted"));}decisions+=1;let decision=decide_next(&provider,&main_model,&prompt,&queue,&completed,&subtask,&state,&catalog,&interrupt).await?;if let Some(s)=decision.subtask{validate_replanned_subtask(&s,&completed,&queue)?;queue.push_front(s);}else if matches!(decision.decision,DecisionKind::Replan){return Err(anyhow!("controller requested recovery without a valid recovery subtask"));}else if matches!(decision.decision,DecisionKind::Complete){let _=tx.send(AgentEvent::Status{message:format!("Done: {}",decision.reason)});let _=tx.send(AgentEvent::Progress{message:format!("Done: {}",decision.reason)});break;}}
+            let _=tx.send(AgentEvent::Status{message:"Understanding your request…".into()});
+            let mut budget=CallBudget::new(harness_cfg.max_llm_calls_single_task.max(2));
+            // 0. Route (cheap, no LLM) + domain inference for preflight/schema scope.
+            let route_owned=route.clone().unwrap_or_else(||catalog.route(&prompt));
+            let domains=domains_for(&catalog,&route_owned,&prompt);
+            let resolved_binary=lucy_config::LucyConfig{ browser: browser_cfg.clone(), ..lucy_config::LucyConfig::default() }.resolve_browser_binary();
+            // 1. Deterministic preflight (§4.2): 0 LLM calls, idempotent.
+            let pf=preflight_for_domains(&domains,&browser_cfg,&resolved_binary).await;
+            if let PreflightState::Failed(reason)=pf{
+                let _=tx.send(AgentEvent::History{message:TurnMessage::User(prompt.clone())});
+                return Err(anyhow!("environment preflight failed: {reason}"));
             }
-            let text=if notes.is_empty(){"Completed the request.".to_string()}else if notes.len()==1{format!("Completed: {}",notes[0])}else{let mut text=format!("Completed {} steps.",notes.len());for note in notes.iter().take(8){text.push_str(&format!("\n- {note}"));}text};let assistant=TurnMessage::Assistant(AssistantTurn{text:Some(text.clone()),tool_calls:Vec::new()});let _=tx.send(AgentEvent::History{message:assistant});let _=tx.send(AgentEvent::TextDelta{text});Ok::<(),anyhow::Error>(())
-        };if let Err(e)=run.await{let _=tx.send(AgentEvent::Error{message:e.to_string()});};let _=tx.send(AgentEvent::Done);});Ok(rx)
+            let browser_ready=cdp_port_responds(browser_cfg.cdp_port);
+            // 2. Offered schemas (§11.4.1 + §6): batch covers → singles hidden;
+            // launch hidden when a session already exists. Local tools are few
+            // and always offered so file/shell intents stay expressible.
+            let filtered=catalog.planner_tool_set(&route_owned.candidates,browser_ready);
+            let mut allowed:HashSet<String>=filtered.into_iter().collect();
+            for n in registry.local_tool_names(){allowed.insert(n);}
+            if allowed.is_empty(){return Err(anyhow!("no tools available for this request"));}
+            let schemas=registry.definitions_for_names(&allowed);
+            let planner_user=planner_user_text(&prompt,&catalog,&route_owned,browser_ready,&resolved_binary,&browser_cfg);
+            // 3. Router+Planner (Call 1): native tool calling, full sequence.
+            budget.record("router+planner");
+            let mut turn=provider.plan_with_tools(prompts::ROUTER_PLANNER,&history,&planner_user,&schemas,interrupt.clone()).await?;
+            let mut envelope=parse_router_envelope(turn.text.as_deref(),&prompt);
+            // Chat mode: no tool calls → immediate reply (1 call total).
+            if turn.tool_calls.is_empty(){
+                let _=tx.send(AgentEvent::History{message:TurnMessage::User(prompt.clone())});
+                let text=envelope.reply.filter(|r|!r.trim().is_empty()).or(turn.text.clone()).unwrap_or_else(||"Done.".to_string());
+                let text=planner::strip_action_claims(&text);
+                let assistant=TurnMessage::Assistant(AssistantTurn{text:Some(text.clone()),tool_calls:Vec::new()});
+                let _=tx.send(AgentEvent::History{message:assistant});
+                let _=tx.send(AgentEvent::TextDelta{text});
+                return Ok::<(),anyhow::Error>(());
+            }
+            if envelope.mode!="act"{
+                // Model called tools but labeled the envelope chat: trust the
+                // tools (act), deriving the goal from the prompt.
+                envelope=parse_router_envelope(None,&prompt);
+            }
+            // Immutable goal object (§7): created once, never rewritten.
+            let goal=GoalObject::new(
+                envelope.goal_statement.unwrap_or_else(||prompt.clone()),
+                envelope.success_condition.unwrap_or_else(||format!("The requested outcome is observably true: {prompt}")),
+                domains.clone(),
+            )?;
+            // Strict validation (§7): reject-and-retry once, then escalate.
+            if let Err(e)=validate_plan_with_registry(&turn.tool_calls,Some(&catalog),browser_ready,&registry){
+                tracing::warn!(error=%e,"planner output invalid; retrying once");
+                budget.record("router+planner-retry");
+                let retry_user=format!("{planner_user}\n\nYour previous output was invalid: {e}. Return ONLY a valid full tool_calls sequence ending in a read-only observation step.");
+                turn=provider.plan_with_tools(prompts::ROUTER_PLANNER,&history,&retry_user,&schemas,interrupt.clone()).await?;
+                validate_plan_with_registry(&turn.tool_calls,Some(&catalog),browser_ready,&registry)?;
+            }
+            let _=tx.send(AgentEvent::History{message:TurnMessage::User(prompt.clone())});
+            let _=tx.send(AgentEvent::Progress{message:format!("Plan ready: {} tool call{}…",turn.tool_calls.len(),if turn.tool_calls.len()==1{""}else{"s"})});
+            // 4. Tool runtime (§4.4): execute the FULL sequence, 0 LLM calls.
+            let mut actions=0usize;
+            let (mut trace,mut failed)=run_tool_sequence(&turn.tool_calls,&registry,Some(&catalog),&working_dir,&interrupt,&approvals.with_events(tx.clone()),&tx,&browser_cfg,&resolved_binary,"plan",&mut actions,harness_cfg.max_step_retries).await?;
+            // 5. Genuine deviation only → scoped recovery (§4.6), bounded.
+            let mut recoveries=0usize;
+            while failed.is_some() && recoveries<harness_cfg.max_recoveries{
+                if interrupt.is_set(){return Err(lucy_core::LucyError::Cancelled.into());}
+                let (failed_tool,failed_input,failed_err)=failed.clone().expect("checked");
+                recoveries+=1;
+                budget.record(format!("recovery-{recoveries}"));
+                let _=tx.send(AgentEvent::Progress{message:format!("Step '{failed_tool}' needs a different approach — recovering…")});
+                let completed_summary=trace.completed_summary();
+                let rec_system=prompts::RECOVERY
+                    .replace("{goal_statement}",&goal.goal_statement)
+                    .replace("{success_condition}",&goal.success_condition)
+                    .replace("{completed_steps_summary}",if completed_summary.is_empty(){"(none — the first step failed)"}else{&completed_summary})
+                    .replace("{failed_step}",&format!("{failed_tool} {failed_input}"))
+                    .replace("{error_detail}",&failed_err.to_string());
+                let rec_user=recovery_user_message(&goal,&completed_summary,&format!("{failed_tool} {failed_input}"),&failed_err);
+                let rec_turn=provider.plan_with_tools(&rec_system,&history,&rec_user,&schemas,interrupt.clone()).await?;
+                if rec_turn.tool_calls.is_empty(){
+                    return Err(anyhow!("recovery reported no viable path: {}",rec_turn.text.unwrap_or_default()));
+                }
+                // Recovery invariant: must lead back to the success condition,
+                // never a bare environment fix-up (§4.6). Retry once.
+                if let Err(e)=validate_recovery_calls(&rec_turn.tool_calls,Some(&catalog),cdp_port_responds(browser_cfg.cdp_port),&goal){
+                    tracing::warn!(error=%e,"recovery output invalid; retrying once");
+                    let retry_user=format!("{rec_user}\n\nYour previous recovery was invalid: {e}. Return the SMALLEST replacement sequence that reaches the original success condition, ending in observation.");
+                    let retry=provider.plan_with_tools(&rec_system,&history,&retry_user,&schemas,interrupt.clone()).await?;
+                    budget.record(format!("recovery-{recoveries}-retry"));
+                    validate_recovery_calls(&retry.tool_calls,Some(&catalog),cdp_port_responds(browser_cfg.cdp_port),&goal)?;
+                    let (t2,f2)=run_tool_sequence(&retry.tool_calls,&registry,Some(&catalog),&working_dir,&interrupt,&approvals.with_events(tx.clone()),&tx,&browser_cfg,&resolved_binary,&format!("recovery-{recoveries}"),&mut actions,harness_cfg.max_step_retries).await?;
+                    trace=t2;failed=f2;
+                } else {
+                    let (t2,f2)=run_tool_sequence(&rec_turn.tool_calls,&registry,Some(&catalog),&working_dir,&interrupt,&approvals.with_events(tx.clone()),&tx,&browser_cfg,&resolved_binary,&format!("recovery-{recoveries}"),&mut actions,harness_cfg.max_step_retries).await?;
+                    trace=t2;failed=f2;
+                }
+            }
+            if let Some((failed_tool,_failed_input,failed_err))=failed{
+                return Err(anyhow!("could not complete '{}': recovery budget exhausted (last error in '{}': {})",goal.goal_statement,failed_tool,failed_err));
+            }
+            // 6. Verifier (final call): outcome, not step (§4.7). Complete or
+            // recover — there is no third "continue with empty plan" branch.
+            budget.record("verifier");
+            let final_obs=trace.final_observation();
+            let ver_system=prompts::VERIFIER
+                .replace("{success_condition}",&goal.success_condition)
+                .replace("{final_observation}",&final_obs.to_string());
+            let ver_value=provider.complete_json(&main_model,&ver_system,&verifier_user_message(&goal.success_condition,&final_obs),interrupt.clone()).await?;
+            let mut decision=parse_verifier(&ver_value)?;
+            // One verifier-driven recovery lap at most: a "recover" verdict
+            // with budget left gets a scoped fix + re-verify, not an open loop.
+            if !decision.complete && recoveries<harness_cfg.max_recoveries{
+                if interrupt.is_set(){return Err(lucy_core::LucyError::Cancelled.into());}
+                budget.record("verifier-recovery");
+                let unmet=decision.unmet_reason.clone().unwrap_or_else(||"goal not observably met".into());
+                let _=tx.send(AgentEvent::Progress{message:format!("Verifying… {unmet} — fixing…")});
+                let rec_system=prompts::RECOVERY
+                    .replace("{goal_statement}",&goal.goal_statement)
+                    .replace("{success_condition}",&goal.success_condition)
+                    .replace("{completed_steps_summary}",&trace.completed_summary())
+                    .replace("{failed_step}",&format!("verifier: {unmet}"))
+                    .replace("{error_detail}",&final_obs.to_string());
+                let rec_user=recovery_user_message(&goal,&trace.completed_summary(),&format!("verifier: {unmet}"),&final_obs);
+                let rec_turn=provider.plan_with_tools(&rec_system,&history,&rec_user,&schemas,interrupt.clone()).await?;
+                validate_recovery_calls(&rec_turn.tool_calls,Some(&catalog),cdp_port_responds(browser_cfg.cdp_port),&goal)?;
+                let (t2,f2)=run_tool_sequence(&rec_turn.tool_calls,&registry,Some(&catalog),&working_dir,&interrupt,&approvals.with_events(tx.clone()),&tx,&browser_cfg,&resolved_binary,"verify-recovery",&mut actions,harness_cfg.max_step_retries).await?;
+                if let Some((t,_,e))=f2{return Err(anyhow!("verifier-driven recovery failed in '{t}': {e}"));}
+                trace=t2;
+                budget.record("verifier-2");
+                let final_obs2=trace.final_observation();
+                let ver_system2=prompts::VERIFIER
+                    .replace("{success_condition}",&goal.success_condition)
+                    .replace("{final_observation}",&final_obs2.to_string());
+                let ver_value2=provider.complete_json(&main_model,&ver_system2,&verifier_user_message(&goal.success_condition,&final_obs2),interrupt.clone()).await?;
+                decision=parse_verifier(&ver_value2)?;
+            }
+            // §10.8: hold the implementation accountable to the §3 budget.
+            if budget.over_budget() && domains.len()<=2{
+                tracing::warn!(calls=budget.calls,limit=budget.limit,labels=?budget.labels,"single-task LLM call budget exceeded; this is a bug, not caution");
+            } else {
+                tracing::info!(calls=budget.calls,labels=?budget.labels,"harness v2 call budget");
+            }
+            if !decision.complete{
+                let unmet=decision.unmet_reason.unwrap_or_else(||"goal not observably met".into());
+                return Err(anyhow!("goal not met ({}): {}",goal.success_condition,unmet));
+            }
+            let _=tx.send(AgentEvent::Status{message:decision.evidence.clone()});
+            let text=format!("Done: {}",decision.evidence);
+            let assistant=TurnMessage::Assistant(AssistantTurn{text:Some(text.clone()),tool_calls:Vec::new()});
+            let _=tx.send(AgentEvent::History{message:assistant});
+            let _=tx.send(AgentEvent::TextDelta{text});
+            Ok::<(),anyhow::Error>(())
+        };
+        // V2 failure before any History event → fall back to the general
+        // agent (which emits its own User event), mirroring the old triage
+        // fallback. Failures after History stay as Error events so the
+        // session never stores a prompt twice or loses the goal.
+        if let Err(e)=run.await{
+            // Heuristic: if we never got past planning, delegate instead of
+            // surfacing a raw planning error.
+            let msg=e.to_string();
+            let pre_history=!msg.contains("preflight failed")
+                && (msg.contains("planner")||msg.contains("tool_calls")||msg.contains("Recovery")||msg.contains("recovery reported"));
+            if pre_history{
+                tracing::warn!(error=%e,"harness v2 planning failed; falling back to general agent");
+                let _=tx.send(AgentEvent::Status{message:"Planning didn't work out — trying a different approach…".into()});
+                match fallback_agent.execute_with_history_filtered(prompt.clone(),history.clone(),Some(fallback_working_dir.clone()),fallback_interrupt.clone(),HashSet::new()).await{
+                    Ok(mut fb)=>{while let Some(event)=fb.recv().await{let _=tx.send(event);}}
+                    Err(fb_err)=>{let _=tx.send(AgentEvent::Error{message:format!("{e}; fallback also failed: {fb_err}")});}
+                }
+            } else {
+                let _=tx.send(AgentEvent::Error{message:msg});
+            }
+        }
+        let _=tx.send(AgentEvent::Done);});Ok(rx)
     }
     pub async fn history(&self)->Vec<TurnMessage>{self.session.lock().await.history.clone()}
+}
+
+/// Domain inference for preflight scope + goal object (§4.1: compact domain
+/// names, never full schemas). Derived from route candidates; file/shell
+/// intents add `files` so local tools stay expressible.
+fn domains_for(catalog:&HyprFastCatalog,route:&lucy_hyprfast::Route,prompt:&str)->Vec<String>{
+    let mut domains:Vec<String>=Vec::new();
+    for cand in &route.candidates{
+        if let Some(cap)=catalog.capability_for_mcp_name(cand){
+            let d=format!("{:?}",cap.domain).to_ascii_lowercase();
+            if !domains.contains(&d){domains.push(d);}
+        }
+    }
+    let lower=prompt.to_ascii_lowercase();
+    if ["file","read ","write ","create ","delete ","directory","folder","shell","command","run ","git ","search files"].iter().any(|t|lower.contains(t)) && !domains.contains(&"files".to_string()){
+        domains.push("files".into());
+    }
+    if domains.is_empty(){domains.push("general".into());}
+    domains
+}
+
+/// Planner user message: goal + compact capability context + ambient
+/// preflight state. Zero-cost context only — never a fresh observation call.
+fn planner_user_text(prompt:&str,catalog:&HyprFastCatalog,route:&lucy_hyprfast::Route,browser_ready:bool,binary:&str,browser_cfg:&lucy_config::BrowserConfig)->String{
+    let mut text=format!("## CURRENT USER REQUEST\n{prompt}\n");
+    text.push_str(&format!("\n## CAPABILITY SUMMARY (domains + counts only)\n{}\n",capability_summary_line(catalog)));
+    text.push_str(&format!("\n## CURRENT CAPABILITY ROUTE\n{}\n",catalog.context_for(route)));
+    text.push_str(&format!("\n## ENVIRONMENT PREFLIGHT (already checked by the runtime; do not re-check)\nbrowser_ready={browser_ready} browser_binary={binary} cdp_port={}\n",browser_cfg.cdp_port));
+    text.push_str("\n## PLANNING RULE\nPlan from the desired outcome. Current observations and tool evidence outrank assumptions and stale history. Return the FULL ordered tool_calls sequence ending in a read-only observation step.\n");
+    if text.len()>MAX_CONTEXT_CHARS{text.truncate(MAX_CONTEXT_CHARS);text.push_str("\n[context truncated]");}
+    text
+}
+
+/// Strict plan validation (§7 + §11.4): contract shape plus existence in the
+/// registry — an invented tool name fails here, never at runtime.
+fn validate_plan_with_registry(calls:&[ToolCall],catalog:Option<&HyprFastCatalog>,browser_ready:bool,registry:&ToolRegistry)->Result<()>{
+    validate_plan_calls(calls,catalog,browser_ready)?;
+    for c in calls{
+        if registry.get(&c.name).is_none(){
+            return Err(anyhow!("planner selected unknown tool outside the offered schema: {}",c.name));
+        }
+    }
+    Ok(())
+}
+
+/// §4.4 Tool runtime (code, 0 LLM calls): execute the full `tool_calls`
+/// array in order, applying the deterministic recovery table (§4.5) on
+/// deviations. Returns the trace plus the first unrecovered failure as
+/// (tool, input, error) for the scoped recovery call — or `None` when every
+/// step succeeded.
+///
+/// Approval denials and cancellation are hard errors (no recovery): a deny
+/// is the user's decision, not a deviation to route around.
+#[allow(clippy::too_many_arguments)]
+async fn run_tool_sequence(
+    calls:&[ToolCall],
+    registry:&ToolRegistry,
+    catalog:Option<&HyprFastCatalog>,
+    working_dir:&std::path::Path,
+    interrupt:&InterruptSignal,
+    approvals:&ApprovalGate,
+    tx:&mpsc::UnboundedSender<AgentEvent>,
+    browser_cfg:&lucy_config::BrowserConfig,
+    resolved_binary:&str,
+    call_id_prefix:&str,
+    actions:&mut usize,
+    max_retries:usize,
+)->Result<(ExecutionTrace,Option<(String,Value,Value)>)>{
+    use std::time::{Duration, Instant};
+    let started=Instant::now();
+    let mut steps:Vec<StepResult>=Vec::new();
+    let mut repeats:HashMap<String,usize>=HashMap::new();
+    for call in calls{
+        if interrupt.is_set(){return Err(lucy_core::LucyError::Cancelled.into());}
+        if *actions>=MAX_ACTIONS{return Err(anyhow!("computer-operation action budget exhausted; stopping to prevent a loop"));}
+        let fingerprint=format!("{}|{}",call.name,call.input);
+        let seen_count=repeats.entry(fingerprint).or_insert(0);
+        *seen_count+=1;
+        if *seen_count>3{return Err(anyhow!("repeated identical action detected; stopping to prevent an execution loop"));}
+        *actions+=1;
+        let call_id=format!("{call_id_prefix}-{actions}");
+        // §6 destructive gate: catalog `destructive` metadata forces approval
+        // regardless of the prompt path — the runtime check, not the model.
+        let destructive=catalog.and_then(|c|c.capability_for_mcp_name(&call.name)).map(|c|c.destructive).unwrap_or(false);
+        if approvals.needs_approval(&call.name,registry.requires_approval(&call.name)||destructive){
+            let _=tx.send(AgentEvent::Progress{message:format!("Needs your approval: {}…",call.name)});
+            match approvals.ask(&call_id,&call.name,&call.input).await{
+                ApprovalDecision::AllowOnce|ApprovalDecision::AllowAlways=>{},
+                ApprovalDecision::Deny=>{
+                    let denied=serde_json::json!({"denied by user":call.name.clone()});
+                    let _=tx.send(AgentEvent::ToolFinished{id:call_id.clone(),name:call.name.clone(),output:denied.clone(),is_error:true});
+                    return Err(anyhow!("tool '{}' denied by user; stopping",call.name));
+                }
+            }
+        }
+        let _=tx.send(AgentEvent::ToolStarted{id:call_id.clone(),name:call.name.clone(),input:call.input.clone()});
+        let exec=|input:Value,call_id:String|{
+            let working_dir=working_dir.to_path_buf();
+            let interrupt=interrupt.clone();
+            let tx=tx.clone();
+            async move{
+                let ctx=ToolContext{session_id:SessionId::default(),tool_call_id:call_id,working_dir:Some(working_dir),execution_mode:ExecutionMode::Agent,events:tx,interrupt:interrupt.clone()};
+                registry.execute(&call.name,input,ctx).await
+            }
+        };
+        match exec(call.input.clone(),call_id.clone()).await{
+            Ok(output)=>{
+                let _=tx.send(AgentEvent::ToolFinished{id:call_id.clone(),name:call.name.clone(),output:output.clone(),is_error:false});
+                let state=planner::truncate_json(output.clone());
+                let _=tx.send(AgentEvent::History{message:TurnMessage::Tool(ToolResult{call_id:call_id.clone(),name:call.name.clone(),output:state,is_error:false})});
+                steps.push(StepResult{tool:call.name.clone(),status:"ok".into(),result:output});
+            }
+            Err(e)=>{
+                let err_str=e.to_string();
+                let _=tx.send(AgentEvent::ToolFinished{id:call_id.clone(),name:call.name.clone(),output:serde_json::json!({"error":err_str}),is_error:true});
+                // §4.5 deterministic recovery first — the LLM sees this only
+                // if the single deterministic retry also fails.
+                let page_loading={
+                    let l=err_str.to_ascii_lowercase();
+                    l.contains("loading")||l.contains("readystate")||l.contains("not yet rendered")
+                };
+                let fix=if max_retries==0{RecoveryFix::Escalate}else{deterministic_recovery(&err_str,page_loading)};
+                let retry_ok:Option<Value>=match fix{
+                    RecoveryFix::Escalate=>None,
+                    RecoveryFix::RetrySame=>{
+                        let _=tx.send(AgentEvent::Progress{message:format!("Step '{}' timed out — retrying once…",call.name)});
+                        match exec(call.input.clone(),format!("{call_id}-retry")).await{
+                            Ok(v)=>Some(v),
+                            Err(e2)=>{
+                                let _=tx.send(AgentEvent::ToolFinished{id:format!("{call_id}-retry"),name:call.name.clone(),output:serde_json::json!({"error":e2.to_string()}),is_error:true});
+                                None
+                            }
+                        }
+                    }
+                    RecoveryFix::WaitThenRetry=>{
+                        let _=tx.send(AgentEvent::Progress{message:format!("Step '{}' hit a loading page — waiting, then retrying once…",call.name)});
+                        tokio::select!{
+                            _=tokio::time::sleep(Duration::from_secs(2))=>{},
+                            _=interrupt.notified()=>{return Err(lucy_core::LucyError::Cancelled.into());}
+                        }
+                        match exec(call.input.clone(),format!("{call_id}-retry")).await{
+                            Ok(v)=>Some(v),
+                            Err(e2)=>{
+                                let _=tx.send(AgentEvent::ToolFinished{id:format!("{call_id}-retry"),name:call.name.clone(),output:serde_json::json!({"error":e2.to_string()}),is_error:true});
+                                None
+                            }
+                        }
+                    }
+                    RecoveryFix::RelaunchBrowserThenRetry=>{
+                        let _=tx.send(AgentEvent::Progress{message:"Browser connection lost — re-running preflight…".into()});
+                        match preflight_browser(browser_cfg,resolved_binary).await{
+                            PreflightState::Ready=>match exec(call.input.clone(),format!("{call_id}-retry")).await{
+                                Ok(v)=>Some(v),
+                                Err(e2)=>{
+                                    let _=tx.send(AgentEvent::ToolFinished{id:format!("{call_id}-retry"),name:call.name.clone(),output:serde_json::json!({"error":e2.to_string()}),is_error:true});
+                                    None
+                                }
+                            },
+                            PreflightState::Failed(reason)=>{
+                                let _=tx.send(AgentEvent::Progress{message:format!("Browser preflight failed: {reason}")});
+                                None
+                            }
+                        }
+                    }
+                };
+                match retry_ok{
+                    Some(output)=>{
+                        let _=tx.send(AgentEvent::ToolFinished{id:format!("{call_id}-retry"),name:call.name.clone(),output:output.clone(),is_error:false});
+                        let state=planner::truncate_json(output.clone());
+                        let _=tx.send(AgentEvent::History{message:TurnMessage::Tool(ToolResult{call_id:call_id.clone(),name:call.name.clone(),output:state,is_error:false})});
+                        steps.push(StepResult{tool:call.name.clone(),status:"ok".into(),result:output});
+                    }
+                    None=>{
+                        // Timeouts retry with backoff already spent; surface
+                        // the original error for the scoped recovery call.
+                        let err_value=serde_json::json!({"error":err_str,"tool":call.name,"fix_attempted":format!("{fix:?}")});
+                        steps.push(StepResult{tool:call.name.clone(),status:"error".into(),result:err_value.clone()});
+                        let trace=ExecutionTrace::new(steps,started.elapsed().as_millis() as u64);
+                        return Ok((trace,Some((call.name.clone(),call.input.clone(),err_value))));
+                    }
+                }
+            }
+        }
+    }
+    let trace=ExecutionTrace::new(steps,started.elapsed().as_millis() as u64);
+    Ok((trace,None))
 }
 
 fn adk_event_for_turn(message:&TurnMessage)->adk_core::Event{let mut e=adk_core::Event::new(format!("lucy-{}",uuid::Uuid::new_v4()));match message{TurnMessage::User(t)=>{e.author="user".into();e.set_content(adk_core::Content::new("user").with_text(t.clone()));}TurnMessage::Assistant(t)=>{e.author="lucy".into();e.set_content(adk_core::Content::new("assistant").with_text(t.text.clone().unwrap_or_default()));}TurnMessage::Tool(t)=>{e.author="lucy".into();e.set_content(adk_core::Content::new("tool").with_text(t.output.to_string()));}}e}

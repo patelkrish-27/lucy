@@ -4,7 +4,7 @@ use std::{env, fs, path::{Path, PathBuf}};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
-pub struct LucyConfig { pub general: GeneralConfig, pub models: ModelConfig, pub planner: PlannerConfig, pub voice: VoiceConfig, pub hyprfast: HyprFastConfig, pub appearance: AppearanceConfig, pub sessions: SessionConfig, pub approvals: ApprovalConfig }
+pub struct LucyConfig { pub general: GeneralConfig, pub models: ModelConfig, pub planner: PlannerConfig, pub voice: VoiceConfig, pub hyprfast: HyprFastConfig, pub appearance: AppearanceConfig, pub sessions: SessionConfig, pub approvals: ApprovalConfig, pub browser: BrowserConfig, pub harness: HarnessConfig }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct GeneralConfig { pub startup_screen:String, pub compact_after_command:bool }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct ModelConfig {
     pub main:String,
@@ -21,6 +21,34 @@ pub struct LucyConfig { pub general: GeneralConfig, pub models: ModelConfig, pub
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct AppearanceConfig { pub theme:String, pub animations:bool, pub activity_verbosity:String }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct SessionConfig { pub file:Option<PathBuf>, pub dir:Option<PathBuf>, pub resume:bool, pub max_history:usize }
 #[derive(Debug, Clone, Serialize, Deserialize)] #[serde(default)] pub struct ApprovalConfig { pub mode:String }
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserConfig {
+    /// Explicit browser binary. When None, resolved once at startup via
+    /// `which brave || which google-chrome || which chromium ...`, never
+    /// guessed by the LLM per-run (§4.2).
+    pub binary: Option<String>,
+    /// Ordered fallbacks consulted deterministically when the primary
+    /// binary is missing (§4.5). No LLM guessing.
+    pub fallback_binaries: Vec<String>,
+    /// CDP port the harness polls for readiness.
+    pub cdp_port: u16,
+    /// Seconds to poll the CDP port after launch before reporting FAILED.
+    pub launch_timeout_secs: u64,
+    /// Extra flags appended on every managed launch.
+    pub launch_args: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HarnessConfig {
+    /// §3 budget: alert when a single-domain, single-app task exceeds this
+    /// many LLM calls. Routine tasks must stay within 4.
+    pub max_llm_calls_single_task: usize,
+    /// Max scoped-recovery LLM calls per run (genuine deviations only).
+    pub max_recoveries: usize,
+    /// Max deterministic retries per step before escalating to recovery.
+    pub max_step_retries: usize,
+}
 impl Default for GeneralConfig{fn default()->Self{Self{startup_screen:"mascot".into(),compact_after_command:true}}}
 impl Default for ModelConfig{fn default()->Self{Self{
     main:"openchat".into(),
@@ -34,7 +62,9 @@ impl Default for HyprFastConfig{fn default()->Self{Self{command:"hyprfast".into(
 impl Default for AppearanceConfig{fn default()->Self{Self{theme:"lucy".into(),animations:true,activity_verbosity:"normal".into()}}}
 impl Default for SessionConfig{fn default()->Self{Self{file:None,dir:None,resume:true,max_history:100}}}
 impl Default for ApprovalConfig{fn default()->Self{Self{mode:"write".into()}}}
-impl Default for LucyConfig{fn default()->Self{Self{general:Default::default(),models:Default::default(),planner:Default::default(),voice:Default::default(),hyprfast:Default::default(),appearance:Default::default(),sessions:Default::default(),approvals:Default::default()}}}
+impl Default for BrowserConfig{fn default()->Self{Self{binary:None,fallback_binaries:vec!["brave".into(),"brave-browser".into(),"google-chrome".into(),"chromium".into(),"chromium-browser".into()],cdp_port:9222,launch_timeout_secs:8,launch_args:vec![]}}}
+impl Default for HarnessConfig{fn default()->Self{Self{max_llm_calls_single_task:4,max_recoveries:2,max_step_retries:1}}}
+impl Default for LucyConfig{fn default()->Self{Self{general:Default::default(),models:Default::default(),planner:Default::default(),voice:Default::default(),hyprfast:Default::default(),appearance:Default::default(),sessions:Default::default(),approvals:Default::default(),browser:Default::default(),harness:Default::default()}}}
 impl LucyConfig {
  pub fn path()->Result<PathBuf>{if let Ok(p)=env::var("LUCY_CONFIG"){return Ok(PathBuf::from(p));}let home=env::var_os("HOME").context("HOME is not set")?;Ok(PathBuf::from(home).join(".config/lucy/config.toml"))}
  pub fn load()->Result<Self>{let path=Self::path()?;let mut cfg=if path.exists(){let text=fs::read_to_string(&path).with_context(||format!("reading {}",path.display()))?;toml::from_str::<Self>(&text).with_context(||format!("parsing {}",path.display()))?}else{Self::default()};cfg.apply_env()?;cfg.validate()?;Ok(cfg)}
@@ -63,8 +93,8 @@ impl LucyConfig {
         *self=value.try_into()?;
         self.validate()
     }
- pub fn reset(&mut self){*self=Self::default();}
-  pub fn validate(&self)->Result<()>{if self.planner.max_subtasks==0||self.planner.max_subtasks>256{bail!("planner.max_subtasks must be between 1 and 256");}if self.planner.max_depth==0||self.planner.max_depth>64{bail!("planner.max_depth must be between 1 and 64");}if self.hyprfast.max_candidates==0||self.hyprfast.max_candidates>68{bail!("hyprfast.max_candidates must be between 1 and 68");}if self.sessions.max_history==0{bail!("sessions.max_history must be greater than 0");}match self.approvals.mode.as_str(){"never"|"write"|"always"=>{},_=>bail!("approvals.mode must be never|write|always")}Ok(())}
+  pub fn reset(&mut self){*self=Self::default();}
+   pub fn validate(&self)->Result<()>{if self.planner.max_subtasks==0||self.planner.max_subtasks>256{bail!("planner.max_subtasks must be between 1 and 256");}if self.planner.max_depth==0||self.planner.max_depth>64{bail!("planner.max_depth must be between 1 and 64");}if self.hyprfast.max_candidates==0||self.hyprfast.max_candidates>68{bail!("hyprfast.max_candidates must be between 1 and 68");}if self.sessions.max_history==0{bail!("sessions.max_history must be greater than 0");}if self.browser.cdp_port==0{bail!("browser.cdp_port must be non-zero");}if self.harness.max_llm_calls_single_task==0||self.harness.max_llm_calls_single_task>32{bail!("harness.max_llm_calls_single_task must be between 1 and 32");}match self.approvals.mode.as_str(){"never"|"write"|"always"=>{},_=>bail!("approvals.mode must be never|write|always")}Ok(())}
  fn apply_env(&mut self)->Result<()>{
         if let Some(v)=env::var_os("OPENAI_MODEL"){self.models.main=v.to_string_lossy().into_owned();}
         // Legacy generic base_url
@@ -104,6 +134,8 @@ impl LucyConfig {
         if let Some(v)=env::var_os("LUCY_STT_MODEL"){self.voice.model=v.to_string_lossy().into_owned();}
         if let Some(v)=env::var_os("LUCY_STT_LANGUAGE"){self.voice.language=Some(v.to_string_lossy().into_owned());}
         if let Some(v)=env::var_os("LUCY_HYPRFAST_MAX_CANDIDATES"){self.hyprfast.max_candidates=v.to_string_lossy().parse()?;}
+        if let Ok(v)=env::var("LUCY_BROWSER_BINARY"){ if !v.trim().is_empty(){ self.browser.binary=Some(v); } }
+        if let Ok(v)=env::var("LUCY_BROWSER_CDP_PORT"){ if !v.trim().is_empty(){ self.browser.cdp_port=v.parse()?; } }
         Ok(())
     }
     /// Returns the effective LLM API key from config or env (any brand) — generic fallback
@@ -147,6 +179,19 @@ impl LucyConfig {
             None
         })
     }
+    /// §4.2: resolve the browser binary once from config, never per-run by
+    /// the LLM. Order: explicit config → LUCY_BROWSER_BINARY → `which`
+    /// over the fallback list → first fallback name as last resort.
+    pub fn resolve_browser_binary(&self)->String{
+        if let Some(b)=self.browser.binary.clone().filter(|v|!v.trim().is_empty()){
+            return b;
+        }
+        for cand in &self.browser.fallback_binaries{
+            if command_exists(cand){ return cand.clone(); }
+        }
+        self.browser.fallback_binaries.first().cloned().unwrap_or_else(||"brave".into())
+    }
+    pub fn cdp_port(&self)->u16{ self.browser.cdp_port }
 }
 fn parse_value(raw:&str,old:&toml::Value)->Result<toml::Value>{if matches!(old,toml::Value::String(_)){return Ok(toml::Value::String(raw.to_owned()));}raw.parse::<toml::Value>().map_err(|e| anyhow::anyhow!("invalid value: {e}"))}
 pub fn doctor()->Vec<(&'static str,bool,String)>{

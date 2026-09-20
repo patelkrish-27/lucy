@@ -130,17 +130,153 @@ impl OpenAIProvider {
         let status=res.status();let body=res.text().await.context("failed to read JSON model response")?;
         if !status.is_success(){return Err(anyhow!("OpenAI API returned {}: {}",status,Self::truncate_body(&body)));}
         let resp:Value=serde_json::from_str(&body).context("invalid JSON model response")?;
-        let _usage=Self::parse_usage(&resp);
+        if let Some(u)=Self::parse_usage(&resp){if let Ok(mut total)=self.usage.lock(){total.add(&u);}}
         let content=resp["choices"][0]["message"]["content"].as_str().ok_or_else(||anyhow!("JSON model returned no content"))?;
-        serde_json::from_str(content).or_else(|_|{let cleaned=content.trim().trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();serde_json::from_str(cleaned).context("JSON model returned invalid JSON")})
+        Self::extract_json(content)
     }
+    /// Parse model output robustly: strict JSON first, then fenced code blocks,
+    /// then the largest balanced `{...}` object embedded in prose. Some
+    /// backends (agentic proxies, non-instruct models) return commentary
+    /// around the JSON or ignore `response_format` entirely; without this
+    /// the whole hierarchical plan fails on one malformed reply.
+    pub fn extract_json(content:&str)->Result<Value>{
+        if let Ok(v)=serde_json::from_str::<Value>(content){return Ok(v);}
+        let trimmed=content.trim();
+        for fence in ["```json","```JSON","```"]{
+            if let Some(rest)=trimmed.strip_prefix(fence){
+                if let Some(end)=rest.rfind("```"){
+                    if let Ok(v)=serde_json::from_str::<Value>(rest[..end].trim()){return Ok(v);}
+                } else if let Ok(v)=serde_json::from_str::<Value>(rest.trim()){return Ok(v);}
+            }
+        }
+        if let Some(obj)=largest_balanced_object(trimmed){
+            if let Ok(v)=serde_json::from_str::<Value>(&obj){return Ok(v);}
+        }
+        Err(anyhow!("JSON model returned invalid JSON: {}",Self::truncate_body(content)))
+    }
+    /// Raw text completion used when the caller needs graceful degradation
+    /// (e.g. triage falling back to chat instead of erroring). Tracks token
+    /// usage like the JSON path.
+    pub async fn complete_content(&self, model:&str, system:&str, user:&str, interrupt:InterruptSignal)->Result<String>{
+        if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
+        let api_key = self.api_key()?;
+        let base_url = self.base_url();
+        let payload=json!({"model":model,"messages":[{"role":"system","content":system},{"role":"user","content":user}],"temperature":0,"response_format":{"type":"json_object"}});
+        let url=format!("{}/chat/completions",base_url.trim_end_matches('/'));
+        if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
+        let res=self.post_json(&url,&api_key,&payload,&interrupt).await?;
+        let status=res.status();let body=res.text().await.context("failed to read JSON model response")?;
+        if !status.is_success(){return Err(anyhow!("OpenAI API returned {}: {}",status,Self::truncate_body(&body)));}
+        let resp:Value=serde_json::from_str(&body).context("invalid JSON model response")?;
+        if let Some(u)=Self::parse_usage(&resp){if let Ok(mut total)=self.usage.lock(){total.add(&u);}}
+        resp["choices"][0]["message"]["content"].as_str().map(str::to_owned).ok_or_else(||anyhow!("JSON model returned no content"))
+    }
+    /// §10.1 — native function/tool calling for the v2 harness.
+    ///
+    /// Unlike `complete_json`/`complete_content` (which paste tool schemas
+    /// as text and parse JSON-in-prose), this passes a real `tools` array
+    /// and reads the provider's guaranteed `tool_calls` array. The returned
+    /// `ModelTurn.text` carries the planner's goal/success-condition JSON
+    /// (or chat reply); `ModelTurn.tool_calls` IS the plan.
+    pub async fn plan_with_tools(
+        &self,
+        system:&str,
+        history:&[TurnMessage],
+        user_text:&str,
+        tools:&[Value],
+        interrupt:InterruptSignal,
+    )->Result<ModelTurn>{
+        if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
+        let mut messages=Vec::new();
+        messages.push(json!({"role":"system","content":system}));
+        for msg in history {
+            match msg {
+                TurnMessage::User(text)=>messages.push(json!({"role":"user","content":text})),
+                TurnMessage::Assistant(turn)=>{
+                    let mut m=json!({"role":"assistant","content":turn.text});
+                    if !turn.tool_calls.is_empty(){
+                        m["tool_calls"]=Value::Array(turn.tool_calls.iter().map(|c|json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":serde_json::to_string(&c.input).unwrap_or_else(|_|"{}".into())}})).collect());
+                    }
+                    messages.push(m)
+                }
+                TurnMessage::Tool(res)=>messages.push(json!({"role":"tool","tool_call_id":res.call_id,"name":res.name,"content":res.output.to_string()})),
+            }
+        }
+        messages.push(json!({"role":"user","content":user_text}));
+        let model=self.model();
+        let mut payload=json!({"model":model,"messages":messages,"temperature":0});
+        if !tools.is_empty(){
+            payload["tools"]=json!(tools.iter().map(|t|{
+                // Accept both `{"name","description","input_schema"}` (our
+                // registry shape) and pre-built `{"type":"function",...}`.
+                if t.get("type").and_then(Value::as_str)==Some("function"){ t.clone() }
+                else { json!({"type":"function","function":{"name":t["name"],"description":t["description"],"parameters":t["input_schema"]}}) }
+            }).collect::<Vec<_>>());
+            payload["tool_choice"]=serde_json::json!("auto");
+        }
+        let api_key = self.api_key()?;
+        let base_url = self.base_url();
+        let url=format!("{}/chat/completions",base_url.trim_end_matches('/'));
+        if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
+        let res=self.post_json(&url,&api_key,&payload,&interrupt).await?;
+        let status=res.status();let body=res.text().await.context("failed to read response body")?;
+        if !status.is_success(){return Err(anyhow!("OpenAI API returned {}: {}",status,Self::truncate_body(&body)));}
+        let resp_json:Value=serde_json::from_str(&body).context("invalid JSON response from OpenAI")?;
+        let message=&resp_json["choices"][0]["message"];
+        let text=message["content"].as_str().map(str::to_owned);
+        let mut tool_calls=Vec::new();
+        if let Some(calls)=message["tool_calls"].as_array(){
+            for call in calls{
+                let id=call["id"].as_str().unwrap_or_default().to_owned();
+                let id=if id.is_empty(){ format!("plan-{}", uuid::Uuid::new_v4()) } else { id };
+                let name=call["function"]["name"].as_str().unwrap_or_default().to_owned();
+                let args=call["function"]["arguments"].as_str().unwrap_or("{}");
+                let input:Value=serde_json::from_str(args).unwrap_or_else(|_|json!({}));
+                if name.is_empty(){ continue; }
+                if !input.is_object(){ continue; }
+                tool_calls.push(ToolCall{id,name,input});
+            }
+        }
+        let usage=Self::parse_usage(&resp_json);
+        if let Some(ref u)=usage{if let Ok(mut total)=self.usage.lock(){total.add(u);}}
+        Ok(ModelTurn{text,stop:tool_calls.is_empty(),tool_calls,usage})
+    }
+}
+/// Return the largest balanced `{...}` substring, respecting strings/escapes.
+fn largest_balanced_object(text:&str)->Option<String>{
+    let bytes=text.as_bytes();let mut best:Option<(usize,usize)>=None;
+    let mut i=0;
+    while i<bytes.len(){
+        if bytes[i]!=b'{'{i+=1;continue;}
+        let mut depth=0i32;let mut in_str=false;let mut esc=false;let mut j=i;
+        while j<bytes.len(){
+            let b=bytes[j];
+            if in_str{if esc{esc=false;}else if b==b'\\'{esc=true;}else if b==b'"'{in_str=false;}}
+            else{if b==b'"'{in_str=true;}else if b==b'{'{depth+=1;}else if b==b'}'{depth-=1;if depth==0{match best{Some((_,len))if j+1-i<=len=>{},_=>best=Some((i,j+1-i))}}break;}}
+            j+=1;
+        }
+        i+=1;
+    }
+    best.map(|(s,l)|text[s..s+l].to_owned())
+}
+#[cfg(test)]
+mod tests{
+    use super::*;
+    #[test]fn extracts_strict_json(){assert_eq!(OpenAIProvider::extract_json(r#"{"mode":"chat","reply":"hi"}"#).unwrap()["mode"],"chat");}
+    #[test]fn extracts_fenced_json(){assert_eq!(OpenAIProvider::extract_json("```json\n{\"mode\":\"chat\",\"reply\":\"hi\"}\n```").unwrap()["mode"],"chat");}
+    #[test]fn extracts_prose_embedded_json(){
+        let v=OpenAIProvider::extract_json("Sure! Here you go: {\"mode\":\"chat\",\"reply\":\"hi\"} hope that helps.").unwrap();
+        assert_eq!(v["mode"],"chat");
+    }
+    #[test]fn rejects_plain_text(){assert!(OpenAIProvider::extract_json("I am playing the video now.").is_err());}
+    #[test]fn balanced_object_respects_strings(){assert_eq!(largest_balanced_object(r#"a {"k":"} not end"} b"#).unwrap(),r#"{"k":"} not end"}"#);}
 }
 #[async_trait::async_trait]
 impl ModelProvider for OpenAIProvider {
     async fn run_turn(&self,request:ModelRequest,_events:mpsc::UnboundedSender<AgentEvent>,interrupt:InterruptSignal)->anyhow::Result<ModelTurn>{
         if interrupt.is_set(){return Err(LucyError::Cancelled.into());}
         let mut messages=Vec::new();
-        messages.push(json!({"role":"system","content":"You are Lucy, a warm and friendly AI assistant that operates the user's computer. You are concise: give short answers and brief summaries of what you did, and expand only when asked. You act through tools: prefer precise tool use, minimize unnecessary steps, and verify important actions before reporting success. Never claim an error occurred unless a tool call actually returned an error. Never ask the user for permission to turn on, open or enable apps: just call the appropriate tool, and any approval needed is handled by the app automatically. When asked to play music or video, act immediately (open a search or stream URL with a browser, launch or shell tool) instead of describing what you would do. Always reply in English. Format every reply for a plain-text terminal: short paragraphs separated by blank lines, one list item per line starting with '- ', no **bold** markers and no backticks."}));
+        messages.push(json!({"role":"system","content":"You are Lucy, a warm and friendly AI assistant that operates the user's computer. You are concise: give short answers and brief summaries of what you did, and expand only when asked. You act through tools: prefer precise tool use, minimize unnecessary steps, and verify important actions before reporting success. Never claim an error occurred unless a tool call actually returned an error. Never claim you completed a computer action unless a tool call just performed it. Never ask the user for permission to turn on, open or enable apps: just call the appropriate tool, and any approval needed is handled by the app automatically. When asked to play music or video, act immediately (open a search or stream URL with a browser, launch or shell tool) instead of describing what you would do. Reply in the user's language. Format every reply for a plain-text terminal: short paragraphs separated by blank lines, one list item per line starting with '- ', no **bold** markers and no backticks."}));
         for msg in request.history {match msg{TurnMessage::User(text)=>messages.push(json!({"role":"user","content":text})),TurnMessage::Assistant(turn)=>{let mut m=json!({"role":"assistant","content":turn.text});if !turn.tool_calls.is_empty(){m["tool_calls"]=Value::Array(turn.tool_calls.iter().map(|c|json!({"id":c.id,"type":"function","function":{"name":c.name,"arguments":serde_json::to_string(&c.input).unwrap_or_else(|_|"{}".into())}})).collect());}messages.push(m)},TurnMessage::Tool(res)=>messages.push(json!({"role":"tool","tool_call_id":res.call_id,"name":res.name,"content":res.output.to_string()}))}}
         let model=self.model();let mut payload=json!({"model":model,"messages":messages});
         if !request.tools.is_empty(){payload["tools"]=json!(request.tools.iter().map(|t|json!({"type":"function","function":{"name":t["name"],"description":t["description"],"parameters":t["input_schema"]}})).collect::<Vec<_>>());}

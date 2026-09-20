@@ -16,3 +16,4 @@ tracing.workspace = true
 lucy-core = { path = "../lucy-core" }
 lucy-tools = { path = "../lucy-tools" }
 lucy-config = { path = "../lucy-config" }
+uuid.workspace = true

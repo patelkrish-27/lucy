@@ -1,4 +1,15 @@
-//! Lucy planner: main-model planning, tool selection, verification, and recovery.
+//! Lucy planner (v1 pipeline — superseded by `harness` v2).
+//!
+//! The TRIAGE → per-step Tool Selector → Closed-Loop Controller loop below is
+//! no longer on the execution path (`LucyRuntime::plan_and_execute` runs the
+//! v2 harness: one Router+Planner call, deterministic preflight/recovery, one
+//! Verifier call). It is retained because its unit tests pin validation
+//! behavior the harness still relies on conceptually, and because
+//! `strip_action_claims` / `truncate_json` / `SubTask` are still live shared
+//! helpers. Everything else in this file is intentionally dead code.
+//!
+//! See `docs/lucy-harness-architecture.md` §9–§10.
+#![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
