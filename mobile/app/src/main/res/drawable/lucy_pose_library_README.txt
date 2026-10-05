@@ -1,0 +1,1 @@
+Mascot pose assets are extracted from the provided Lucy mascot pose library image and stored as lucy_<pose>.png. The mobile UI selects an individual pose per state; the complete library sheet is not rendered in-app.
