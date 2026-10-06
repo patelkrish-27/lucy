@@ -160,7 +160,7 @@ impl Tool for ReadFileTool {
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("path is required"))?;
-        let path = ctx.resolve_path(std::path::Path::new(p));
+        let path = ctx.resolve_path_checked(std::path::Path::new(p))?;
         let content = tokio::fs::read_to_string(&path).await?;
         Ok(serde_json::json!({"path":path,"content":content}))
     }
@@ -186,7 +186,7 @@ impl Tool for WriteFileTool {
             .get("content")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("content is required"))?;
-        let path = ctx.resolve_path(std::path::Path::new(p));
+        let path = ctx.resolve_path_checked(std::path::Path::new(p))?;
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -211,7 +211,7 @@ impl Tool for ListDirTool {
     }
     async fn execute(&self, input: Value, ctx: ToolContext) -> Result<Value> {
         let p = input.get("path").and_then(Value::as_str).unwrap_or(".");
-        let path = ctx.resolve_path(std::path::Path::new(p));
+        let path = ctx.resolve_path_checked(std::path::Path::new(p))?;
         let mut rd = tokio::fs::read_dir(&path).await?;
         let mut items = Vec::new();
         while let Some(e) = rd.next_entry().await? {
@@ -244,7 +244,7 @@ impl Tool for SearchFilesTool {
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("query is required"))?;
         let p = input.get("path").and_then(Value::as_str).unwrap_or(".");
-        let dir = ctx.resolve_path(std::path::Path::new(p));
+        let dir = ctx.resolve_path_checked(std::path::Path::new(p))?;
         let o = tokio::process::Command::new("rg")
             .arg("--line-number")
             .arg("--hidden")
@@ -326,7 +326,7 @@ impl Tool for EditFileTool {
                 "old_string must not be empty".into()
             )));
         }
-        let path = ctx.resolve_path(std::path::Path::new(p));
+        let path = ctx.resolve_path_checked(std::path::Path::new(p))?;
         let content = tokio::fs::read_to_string(&path).await?;
         let count = content.matches(old).count();
         if count == 0 {
@@ -480,7 +480,7 @@ impl Tool for GlobTool {
             )));
         }
         let p = input.get("path").and_then(Value::as_str).unwrap_or(".");
-        let base = ctx.resolve_path(std::path::Path::new(p));
+        let base = ctx.resolve_path_checked(std::path::Path::new(p))?;
         let rels = glob_walk(&base)?;
         let pat = pattern.strip_prefix("./").unwrap_or(pattern);
         let segs: Vec<&str> = pat.split('/').collect();
