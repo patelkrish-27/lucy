@@ -227,10 +227,8 @@ pub struct AcpResult {
 fn collect_v1_text(notification: &SessionNotification, output: &mut String) {
     match &notification.update {
         agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(chunk) => {
-            for content in &chunk.content {
-                if let ContentBlock::Text(text) = content {
-                    output.push_str(&text.text);
-                }
+            if let ContentBlock::Text(text) = &chunk.content {
+                output.push_str(&text.text);
             }
         }
         agent_client_protocol::schema::v1::SessionUpdate::AgentMessage(message) => {
