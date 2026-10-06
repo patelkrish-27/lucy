@@ -371,6 +371,7 @@ impl LucyRuntime {
     pub fn register_knowledge_tools(&self, registry: &mut lucy_tools::ToolRegistry) {
         registry.register(KbSearchTool::new(self.knowledge.clone()));
         registry.register(KbGetTool::new(self.knowledge.clone()));
+        registry.register(lucy_knowledge::tools::MemorySearchTool::new(self.memory_hub.clone()));
     }
 
     /// The model the capture pass runs on.
