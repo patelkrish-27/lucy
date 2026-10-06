@@ -288,10 +288,16 @@ impl MemorySearchTool {
 impl Tool for MemorySearchTool {
     fn name(&self) -> &str { "memory_search" }
     fn description(&self) -> &str {
-        "Search Lucy's layered memory hub across conversation memories, facts, scenarios and persona. Read-only."
+        "Search Lucy's layered memory on demand. Use this for exact facts, project context,
+         conversation recall, scenarios, and persona. It does not inject the whole memory store."
     }
     fn parameters_schema(&self) -> Value {
-        json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":16}},"required":["query"]})
+        json!({"type":"object","properties":{
+            "query":{"type":"string"},
+            "layer":{"type":"string","enum":["conversation","atom","scenario","persona"]},
+            "bootstrap":{"type":"boolean","description":"Prefer scenario/persona context before precise facts."},
+            "limit":{"type":"integer","minimum":1,"maximum":16}
+        },"required":["query"]})
     }
     fn requires_approval(&self) -> bool { false }
     async fn execute(&self, input: Value, ctx: ToolContext) -> anyhow::Result<Value> {
@@ -299,7 +305,77 @@ impl Tool for MemorySearchTool {
         let query = input.get("query").and_then(Value::as_str).map(str::trim)
             .filter(|q| !q.is_empty()).ok_or_else(|| anyhow::anyhow!("query is required"))?;
         let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(6).clamp(1,16) as usize;
-        let hits = self.hub.search(query, limit).await;
-        Ok(json!({"matches": hits}))
+        let layer = match input.get("layer").and_then(Value::as_str) {
+            Some("conversation") => Some(crate::MemoryLayer::Conversation),
+            Some("atom") => Some(crate::MemoryLayer::Atom),
+            Some("scenario") => Some(crate::MemoryLayer::Scenario),
+            Some("persona") => Some(crate::MemoryLayer::Persona),
+            Some(other) => return Err(anyhow::anyhow!("unknown memory layer: {other}")),
+            None => None,
+        };
+        let hits = if input.get("bootstrap").and_then(Value::as_bool).unwrap_or(false) && layer.is_none() {
+            self.hub.bootstrap(query, limit).await
+        } else {
+            self.hub.search_layers(query, layer, limit).await
+        };
+        Ok(json!({"matches": hits, "count": hits.len()}))
+    }
+}
+
+/// Lightweight maintenance/status surfaces modelled after self-hosted memory hubs.
+/// Status is safe; slim requires approval because it mutates the local memory index.
+pub struct MemoryStatusTool { hub: Arc<MemoryHub> }
+impl MemoryStatusTool { pub fn new(hub: Arc<MemoryHub>) -> Self { Self { hub } } }
+#[async_trait]
+impl Tool for MemoryStatusTool {
+    fn name(&self) -> &str { "memory_status" }
+    fn description(&self) -> &str { "Show counts for Lucy's conversation, atom, scenario, persona and reusable asset memory." }
+    fn parameters_schema(&self) -> Value { json!({"type":"object","properties":{}}) }
+    fn requires_approval(&self) -> bool { false }
+    async fn execute(&self, _input: Value, ctx: ToolContext) -> anyhow::Result<Value> {
+        if ctx.interrupt.is_set() { return Err(lucy_core::LucyError::Cancelled.into()); }
+        Ok(serde_json::to_value(self.hub.stats().await)?)
+    }
+}
+
+pub struct MemoryAssetsTool { hub: Arc<MemoryHub> }
+impl MemoryAssetsTool { pub fn new(hub: Arc<MemoryHub>) -> Self { Self { hub } } }
+#[async_trait]
+impl Tool for MemoryAssetsTool {
+    fn name(&self) -> &str { "memory_assets" }
+    fn description(&self) -> &str { "List reusable Chat Memory, Skill, Wiki and CodeGraph assets known to Lucy." }
+    fn parameters_schema(&self) -> Value {
+        json!({"type":"object","properties":{"kind":{"type":"string","enum":["chat_memory","skill","wiki","code_graph"]}}})
+    }
+    fn requires_approval(&self) -> bool { false }
+    async fn execute(&self, input: Value, ctx: ToolContext) -> anyhow::Result<Value> {
+        if ctx.interrupt.is_set() { return Err(lucy_core::LucyError::Cancelled.into()); }
+        let kind = match input.get("kind").and_then(Value::as_str) {
+            Some("chat_memory") => Some(crate::AssetKind::ChatMemory),
+            Some("skill") => Some(crate::AssetKind::Skill),
+            Some("wiki") => Some(crate::AssetKind::Wiki),
+            Some("code_graph") => Some(crate::AssetKind::CodeGraph),
+            Some(other) => return Err(anyhow::anyhow!("unknown asset kind: {other}")),
+            None => None,
+        };
+        Ok(json!({"assets": self.hub.assets(kind).await}))
+    }
+}
+
+pub struct MemorySlimTool { hub: Arc<MemoryHub> }
+impl MemorySlimTool { pub fn new(hub: Arc<MemoryHub>) -> Self { Self { hub } } }
+#[async_trait]
+impl Tool for MemorySlimTool {
+    fn name(&self) -> &str { "memory_slim" }
+    fn description(&self) -> &str {
+        "Conservatively maintain Lucy memory by removing exact duplicate L1 atoms only. \
+         It never deletes authored Markdown knowledge or scenario/persona records."
+    }
+    fn parameters_schema(&self) -> Value { json!({"type":"object","properties":{}}) }
+    fn requires_approval(&self) -> bool { true }
+    async fn execute(&self, _input: Value, ctx: ToolContext) -> anyhow::Result<Value> {
+        if ctx.interrupt.is_set() { return Err(lucy_core::LucyError::Cancelled.into()); }
+        let (before, after, removed) = self.hub.slim().await?;
+        Ok(json!({"removed_duplicates":removed,"before":before,"after":after}))
     }
 }
