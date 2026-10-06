@@ -376,6 +376,16 @@ mod tests {
     }
 
     #[test]
+    fn mcp_secret_env_classifier_blocks_common_credentials() {
+        assert!(secret_env_key("OPENAI_API_KEY"));
+        assert!(secret_env_key("GITHUB_TOKEN"));
+        assert!(secret_env_key("AWS_SECRET_ACCESS_KEY"));
+        assert!(secret_env_key("DATABASE_PASSWORD"));
+        assert!(!secret_env_key("PATH"));
+        assert!(!secret_env_key("LANG"));
+    }
+
+    #[test]
     fn mcp_name_collisions_never_overwrite_tools() {
         let mut registry = lucy_tools::ToolRegistry::new();
         let config = McpServerConfig {
