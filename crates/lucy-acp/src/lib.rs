@@ -5,7 +5,7 @@
 
 use agent_client_protocol::schema::ProtocolVersion;
 use agent_client_protocol::schema::v1::{
-    ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
+    CancelNotification, ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, TextContent,
 };
@@ -14,6 +14,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use lucy_core::InterruptSignal;
 
 #[derive(Debug, Clone)]
 pub struct AcpRunner {
@@ -76,10 +77,27 @@ impl AcpRunner {
     }
 
     pub async fn prompt(&self, prompt: &str) -> Result<AcpResult> {
-        self.prompt_with_updates(prompt, |_| {}).await
+        self.prompt_with_interrupt(prompt, InterruptSignal::new()).await
     }
 
-    pub async fn prompt_with_updates<F>(&self, prompt: &str, mut on_update: F) -> Result<AcpResult>
+    /// Run one ACP prompt while propagating Lucy's interrupt to the remote
+    /// session. Dropping the pending request also triggers the SDK's protocol
+    /// cancellation, while `session/cancel` tells ACP-aware agents to stop the
+    /// whole prompt turn and its nested work.
+    pub async fn prompt_with_interrupt(&self, prompt: &str, interrupt: InterruptSignal) -> Result<AcpResult> {
+        self.prompt_with_updates_and_interrupt(prompt, |_| {}, interrupt).await
+    }
+
+    pub async fn prompt_with_updates<F>(&self, prompt: &str, on_update: F) -> Result<AcpResult>
+    where
+        F: FnMut(&SessionNotification),
+    {
+        self.prompt_with_updates_and_interrupt(prompt, on_update, InterruptSignal::new()).await
+    }
+
+    pub async fn prompt_with_updates_and_interrupt<F>(&self, prompt: &str, mut on_update: F, interrupt: InterruptSignal) -> Result<AcpResult>
+    where
+        F: FnMut(&SessionNotification),
     where
         F: FnMut(&SessionNotification),
     {
@@ -145,13 +163,23 @@ impl AcpRunner {
                     .block_task()
                     .await?
                     .session_id;
-                let prompt_response = connection
-                    .send_request(PromptRequest::new(
-                        session.clone(),
-                        vec![ContentBlock::Text(TextContent::new(prompt.to_owned()))],
-                    ))
-                    .block_task()
-                    .await?;
+                let prompt_request = connection.send_request(PromptRequest::new(
+                    session.clone(),
+                    vec![ContentBlock::Text(TextContent::new(prompt.to_owned()))],
+                ));
+                let prompt_response = tokio::select! {
+                    result = prompt_request.block_task() => result?,
+                    _ = interrupt.notified() => {
+                        // ACP v1 requires session/cancel for cancelling the
+                        // current prompt turn. The request handle is dropped
+                        // on this branch as well, which sends protocol-level
+                        // $/cancel_request as a second cooperative signal.
+                        connection
+                            .send_notification(CancelNotification::new(session.clone()))
+                            .map_err(Error::into_internal_error)?;
+                        anyhow::bail!("ACP prompt cancelled");
+                    }
+                };
                 Ok((init, session, prompt_response))
             })
             .await
