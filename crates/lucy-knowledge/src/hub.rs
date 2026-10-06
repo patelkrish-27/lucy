@@ -103,7 +103,7 @@ impl MemoryHub {
 
     pub async fn search(&self, query: &str, limit: usize) -> Vec<MemoryItem> {
         let terms = query.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-            .filter(|x| x.len() >= 2).map(|x| format!("\\\"{}\\\"", x.to_ascii_lowercase()))
+            .filter(|x| x.len() >= 2).map(|x| format!("\\"{}\\"", x.to_ascii_lowercase()))
             .collect::<Vec<_>>();
         if terms.is_empty() { return Vec::new(); }
         let q = terms.join(" OR ");
