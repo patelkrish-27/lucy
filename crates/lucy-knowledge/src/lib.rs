@@ -35,10 +35,12 @@ pub mod capture;
 pub mod provenance;
 pub mod store;
 pub mod tools;
+pub mod hub;
 
 pub use provenance::{Origin, SourceKind};
 pub use store::{Candidate, Chunk, KnowledgeStats, KnowledgeStore, TopicLine};
 pub use tools::{KbGetTool, KbSearchTool};
+pub use hub::{AssetKind, MemoryAsset, MemoryHub, MemoryItem, MemoryLayer};
 
 use std::path::{Path, PathBuf};
 
