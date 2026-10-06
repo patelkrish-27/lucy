@@ -66,7 +66,7 @@ impl StdioMcpClient {
         cmd.args(&self.config.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::inherit());
         // Never leave orphaned MCP children (e.g. `node`) behind when the
         // client is dropped after a one-shot list_tools() at startup.
         cmd.kill_on_drop(true);
@@ -246,8 +246,9 @@ pub fn computer_use_config() -> McpServerConfig {
         name: "computer_use".into(),
         command: std::env::var("LUCY_COMPUTER_USE_COMMAND").unwrap_or_else(|_| "npx".into()),
         args: std::env::var("LUCY_COMPUTER_USE_ARGS")
-            .map(|v| v.split_whitespace().map(str::to_owned).collect())
-            .unwrap_or_else(|_| vec!["-y".into(), "@zavora-ai/computer-use-mcp".into()]),
+            .ok()
+            .and_then(|v| shell_words::split(&v).ok())
+            .unwrap_or_else(|| vec!["-y".into(), "@zavora-ai/computer-use-mcp".into()]),
         env: HashMap::new(),
     }
 }
