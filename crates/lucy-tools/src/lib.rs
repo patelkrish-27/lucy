@@ -245,18 +245,24 @@ impl Tool for SearchFilesTool {
             .ok_or_else(|| anyhow!("query is required"))?;
         let p = input.get("path").and_then(Value::as_str).unwrap_or(".");
         let dir = ctx.resolve_path_checked(std::path::Path::new(p))?;
-        let o = tokio::process::Command::new("rg")
+        let mut child = tokio::process::Command::new("rg")
             .arg("--line-number")
             .arg("--hidden")
             .arg("--glob")
             .arg("!.git")
             .arg(query)
             .arg(&dir)
-            .output()
-            .await?;
-        Ok(
-            serde_json::json!({"success":o.status.success(),"stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr)}),
-        )
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let o = bounded_child_output(&mut child, &ctx.interrupt, DEFAULT_TIMEOUT).await?;
+        Ok(serde_json::json!({
+            "success": o.success,
+            "status": o.status,
+            "stdout": o.stdout,
+            "stderr": o.stderr,
+            "truncated": o.truncated
+        }))
     }
 }
 pub struct GitTool;
@@ -282,14 +288,20 @@ impl Tool for GitTool {
             .map(str::to_owned)
             .collect();
         let dir = ctx.working_dir.clone().unwrap_or(std::env::current_dir()?);
-        let o = tokio::process::Command::new("git")
+        let mut child = tokio::process::Command::new("git")
             .args(&args)
             .current_dir(dir)
-            .output()
-            .await?;
-        Ok(
-            serde_json::json!({"success":o.status.success(),"stdout":String::from_utf8_lossy(&o.stdout),"stderr":String::from_utf8_lossy(&o.stderr),"status":o.status.code()}),
-        )
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+        let o = bounded_child_output(&mut child, &ctx.interrupt, DEFAULT_TIMEOUT).await?;
+        Ok(serde_json::json!({
+            "success": o.success,
+            "status": o.status,
+            "stdout": o.stdout,
+            "stderr": o.stderr,
+            "truncated": o.truncated
+        }))
     }
 }
 pub struct EditFileTool;
@@ -651,6 +663,49 @@ mod tests {
         assert!(allowed_command("ls -la"));
     }
 }
+struct BoundedCommandOutput {
+    status: Option<i32>,
+    success: bool,
+    stdout: String,
+    stderr: String,
+    truncated: bool,
+}
+
+async fn bounded_child_output(
+    child: &mut tokio::process::Child,
+    interrupt: &InterruptSignal,
+    timeout: Duration,
+) -> Result<BoundedCommandOutput> {
+    let stdout = child.stdout.take().ok_or_else(|| anyhow!("failed to capture stdout"))?;
+    let stderr = child.stderr.take().ok_or_else(|| anyhow!("failed to capture stderr"))?;
+    let out_task = tokio::spawn(async move { read_limited(stdout, DEFAULT_OUTPUT_LIMIT).await });
+    let err_task = tokio::spawn(async move { read_limited(stderr, DEFAULT_OUTPUT_LIMIT).await });
+
+    let status = tokio::select! {
+        result = child.wait() => result?,
+        _ = interrupt.notified() => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(LucyError::Cancelled.into());
+        }
+        _ = tokio::time::sleep(timeout) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(anyhow!("command timed out after {} seconds", timeout.as_secs()));
+        }
+    };
+    let stdout = out_task.await??;
+    let stderr = err_task.await??;
+    let truncated = stdout.len() >= DEFAULT_OUTPUT_LIMIT || stderr.len() >= DEFAULT_OUTPUT_LIMIT;
+    Ok(BoundedCommandOutput {
+        status: status.code(),
+        success: status.success(),
+        stdout,
+        stderr,
+        truncated,
+    })
+}
+
 async fn read_limited<R: tokio::io::AsyncRead + Unpin>(
     mut reader: R,
     limit: usize,
