@@ -370,6 +370,25 @@ impl Tool for MemoryRecallTool {
     }
 }
 
+pub struct CodeGraphTool { hub: Arc<MemoryHub> }
+impl CodeGraphTool { pub fn new(hub: Arc<MemoryHub>) -> Self { Self { hub } } }
+#[async_trait]
+impl Tool for CodeGraphTool {
+    fn name(&self) -> &str { "codegraph_query" }
+    fn description(&self) -> &str { "Query indexed Rust symbols in Lucy's CodeGraph without reading the whole repository." }
+    fn parameters_schema(&self) -> Value {
+        json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":32}},"required":["query"]})
+    }
+    fn requires_approval(&self) -> bool { false }
+    async fn execute(&self, input: Value, ctx: ToolContext) -> anyhow::Result<Value> {
+        if ctx.interrupt.is_set() { return Err(lucy_core::LucyError::Cancelled.into()); }
+        let query = input.get("query").and_then(Value::as_str).map(str::trim)
+            .filter(|q| !q.is_empty()).ok_or_else(|| anyhow::anyhow!("query is required"))?;
+        let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1,32) as usize;
+        Ok(json!({"matches":self.hub.codegraph_query(query, limit).await}))
+    }
+}
+
 /// Lightweight maintenance/status surfaces modelled after self-hosted memory hubs.
 /// Status is safe; slim requires approval because it mutates the local memory index.
 pub struct MemoryStatusTool { hub: Arc<MemoryHub> }
