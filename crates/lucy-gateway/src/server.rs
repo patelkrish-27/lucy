@@ -717,7 +717,7 @@ async fn connection_loop(state: Arc<GatewayState>, mut socket: WebSocket) {
                 rt.approval_gate().resolve(&id, lucy_core::ApprovalDecision::Deny);
             }
         }).await;
-        state.end_task().await;
+        task_guard = None;
     }
     state.host.client_disconnected();
     let _ = device_id;
