@@ -90,14 +90,14 @@ impl AcpRunner {
 
     pub async fn prompt_with_updates<F>(&self, prompt: &str, on_update: F) -> Result<AcpResult>
     where
-        F: FnMut(&SessionNotification),
+        F: FnMut(&SessionNotification) + Send + 'static,
     {
         self.prompt_with_updates_and_interrupt(prompt, on_update, InterruptSignal::new()).await
     }
 
-    pub async fn prompt_with_updates_and_interrupt<F>(&self, prompt: &str, mut on_update: F, interrupt: InterruptSignal) -> Result<AcpResult>
+    pub async fn prompt_with_updates_and_interrupt<F>(&self, prompt: &str, on_update: F, interrupt: InterruptSignal) -> Result<AcpResult>
     where
-        F: FnMut(&SessionNotification),
+        F: FnMut(&SessionNotification) + Send + 'static,
     where
         F: FnMut(&SessionNotification),
     {
@@ -119,10 +119,22 @@ impl AcpRunner {
             "ACP session working directory does not exist or is not a directory: {}",
             cwd.display()
         );
-        let (tx, mut rx): (
+        let (tx, rx): (
             UnboundedSender<SessionNotification>,
             UnboundedReceiver<SessionNotification>,
         ) = unbounded_channel();
+        let text = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let text_sink = text.clone();
+        let mut update_task = tokio::spawn(async move {
+            let mut on_update = on_update;
+            let mut rx = rx;
+            while let Some(notification) = rx.recv().await {
+                on_update(&notification);
+                if let Ok(mut output) = text_sink.lock() {
+                    collect_v1_text(&notification, &mut output);
+                }
+            }
+        });
 
         let auto_approve = self.auto_approve_permissions;
         let result = Client
@@ -183,15 +195,11 @@ impl AcpRunner {
             .await
             .context("ACP connection failed")?;
 
-        let mut text = String::new();
-        while let Ok(notification) = rx.try_recv() {
-            on_update(&notification);
-            collect_v1_text(&notification, &mut text);
-        }
-        while let Ok(notification) = rx.try_recv() {
-            on_update(&notification);
-            collect_v1_text(&notification, &mut text);
-        }
+        // The notification handler is live for the whole connection, so the
+        // callback above receives streamed ACP updates while the prompt runs.
+        // Wait for the channel to close so the final update is included too.
+        let _ = update_task.await;
+        let text = text.lock().map(|output| output.clone()).unwrap_or_default();
 
         let (init, session_id, prompt_response) = result;
         Ok(AcpResult {
