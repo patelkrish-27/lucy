@@ -70,7 +70,7 @@ END;
 CREATE TRIGGER IF NOT EXISTS memory_fts_ad AFTER DELETE ON memory_items BEGIN
  INSERT INTO memory_fts(memory_fts,rowid,title,content,source) VALUES('delete',old.id,old.title,old.content,old.source);
 END;
-CREATE TABLE IF NOT EXISTS memory_assets (
+CREATE TABLE IF NOT EXISTS asset_bindings (\n asset_id INTEGER NOT NULL, agent_id TEXT NOT NULL, PRIMARY KEY(asset_id, agent_id),\n FOREIGN KEY(asset_id) REFERENCES memory_assets(id) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS code_nodes (\n id INTEGER PRIMARY KEY AUTOINCREMENT, asset_id INTEGER NOT NULL, kind TEXT NOT NULL,\n name TEXT NOT NULL, file TEXT NOT NULL, signature TEXT NOT NULL, UNIQUE(asset_id,name,file),\n FOREIGN KEY(asset_id) REFERENCES memory_assets(id) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS code_edges (\n from_id INTEGER NOT NULL, to_id INTEGER NOT NULL, kind TEXT NOT NULL,\n PRIMARY KEY(from_id,to_id,kind), FOREIGN KEY(from_id) REFERENCES code_nodes(id) ON DELETE CASCADE,\n FOREIGN KEY(to_id) REFERENCES code_nodes(id) ON DELETE CASCADE\n);\nCREATE TABLE IF NOT EXISTS memory_assets (
  id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, name TEXT NOT NULL,
  description TEXT NOT NULL DEFAULT '', path TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
  owner TEXT NOT NULL DEFAULT 'local', visibility TEXT NOT NULL DEFAULT 'private',
@@ -174,6 +174,26 @@ impl MemoryHub {
         Ok(result.last_insert_rowid())
     }
 
+    pub async fn bind_asset(&self, kind: AssetKind, name: &str, agent_id: &str) -> Result<bool> {
+        let asset = sqlx::query("SELECT id FROM memory_assets WHERE kind=? AND name=?")
+            .bind(asset_name(kind)).bind(name).fetch_optional(&self.pool).await?;
+        let Some(row) = asset else { return Ok(false); };
+        let id: i64 = row.get("id");
+        sqlx::query("INSERT OR IGNORE INTO asset_bindings(asset_id,agent_id) VALUES(?,?)")
+            .bind(id).bind(agent_id.trim()).execute(&self.pool).await?;
+        Ok(true)
+    }
+
+    /// Enforce the asset loadout boundary locally. Private assets are owner-only;
+    /// team assets require the caller to opt into the same team namespace; agent
+    /// assets require an explicit binding. This is intentionally small-user local
+    /// governance rather than pretending Lucy is a multi-tenant service.
+    pub async fn assets_for_agent(&self, agent_id: &str) -> Vec<MemoryAsset> {
+        let rows = sqlx::query("SELECT a.id,a.kind,a.name,a.description,a.path,a.version,a.owner,a.visibility,a.updated_at FROM memory_assets a LEFT JOIN asset_bindings b ON b.asset_id=a.id AND b.agent_id=? WHERE a.visibility='team' OR a.visibility='restricted' AND b.agent_id IS NOT NULL OR a.visibility='agent' AND b.agent_id IS NOT NULL OR a.owner=? ORDER BY a.kind,a.name")
+            .bind(agent_id).bind(agent_id).fetch_all(&self.pool).await.unwrap_or_default();
+        rows.into_iter().filter_map(asset_from_row).collect()
+    }
+
     pub async fn assets(&self, kind: Option<AssetKind>) -> Vec<MemoryAsset> {
         let rows = if let Some(kind) = kind {
             sqlx::query("SELECT id,kind,name,description,path,version,owner,visibility,updated_at FROM memory_assets WHERE kind=? ORDER BY name")
@@ -260,6 +280,20 @@ impl MemoryHub {
             count += 1;
         }
         Ok(count)
+    }
+
+    /// Query indexed CodeGraph symbols and direct relationships.
+    pub async fn codegraph_query(&self, query: &str, limit: usize) -> Vec<serde_json::Value> {
+        let q = query.trim();
+        if q.is_empty() { return Vec::new(); }
+        let rows = sqlx::query("SELECT n.id,n.kind,n.name,n.file,n.signature FROM code_nodes n WHERE n.name LIKE ? OR n.signature LIKE ? ORDER BY n.name LIMIT ?")
+            .bind(format!("%{q}%")).bind(format!("%{q}%")).bind(limit.clamp(1,32) as i64)
+            .fetch_all(&self.pool).await.unwrap_or_default();
+        rows.into_iter().map(|r| serde_json::json!({
+            "id": r.get::<i64,_>("id"), "kind": r.get::<String,_>("kind"),
+            "name": r.get::<String,_>("name"), "file": r.get::<String,_>("file"),
+            "signature": r.get::<String,_>("signature")
+        })).collect()
     }
 
     /// Lightweight Rust CodeGraph indexing. It stores symbols as searchable
