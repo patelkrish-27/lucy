@@ -207,13 +207,6 @@ async fn pair_info(State(state): State<Arc<GatewayState>>) -> impl IntoResponse 
     Json(json!({
         "paired": devices.is_paired(),
         "pairing_live": devices.pairing_live(),
-        "server_id": devices.server_id,
-        "devices": devices.devices.values().map(|d| json!({
-            "id": d.id,
-            "name": d.name,
-            "created_at": d.created_at,
-            "last_seen_at": d.last_seen_at,
-        })).collect::<Vec<_>>(),
     }))
 }
 
