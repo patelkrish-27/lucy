@@ -15,7 +15,7 @@
 //!
 //! Both are read-only and need no approval: they cannot change the machine.
 
-use crate::{KnowledgeStore, store::SEARCH_LIMIT};
+use crate::{KnowledgeStore, MemoryHub, store::SEARCH_LIMIT};
 use async_trait::async_trait;
 use lucy_core::{Tool, ToolContext};
 use serde_json::{Value, json};
@@ -274,5 +274,32 @@ mod tests {
                 .is_err()
         );
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+}
+
+
+/// Search the layered Memory Hub. This is separate from kb_search because
+/// memory assets include episodic/persona/scenario records as well as durable KB.
+pub struct MemorySearchTool { hub: Arc<MemoryHub> }
+impl MemorySearchTool {
+    pub fn new(hub: Arc<MemoryHub>) -> Self { Self { hub } }
+}
+#[async_trait]
+impl Tool for MemorySearchTool {
+    fn name(&self) -> &str { "memory_search" }
+    fn description(&self) -> &str {
+        "Search Lucy's layered memory hub across conversation memories, facts, scenarios and persona. Read-only."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","minimum":1,"maximum":16}},"required":["query"]})
+    }
+    fn requires_approval(&self) -> bool { false }
+    async fn execute(&self, input: Value, ctx: ToolContext) -> anyhow::Result<Value> {
+        if ctx.interrupt.is_set() { return Err(lucy_core::LucyError::Cancelled.into()); }
+        let query = input.get("query").and_then(Value::as_str).map(str::trim)
+            .filter(|q| !q.is_empty()).ok_or_else(|| anyhow::anyhow!("query is required"))?;
+        let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(6).clamp(1,16) as usize;
+        let hits = self.hub.search(query, limit).await;
+        Ok(json!({"matches": hits}))
     }
 }
