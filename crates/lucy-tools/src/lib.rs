@@ -67,6 +67,25 @@ impl Default for ToolRegistry {
         Self::new()
     }
 }
+fn shell_env_is_secret(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.contains("API_KEY")
+        || upper.ends_with("_TOKEN")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("PRIVATE_KEY")
+        || matches!(upper.as_str(), "AWS_ACCESS_KEY_ID" | "AWS_SESSION_TOKEN" | "AWS_SECRET_ACCESS_KEY")
+}
+
+fn apply_shell_environment(command: &mut tokio::process::Command) {
+    if std::env::var("LUCY_ALLOW_INHERITED_SECRETS").ok().as_deref() == Some("1") {
+        return;
+    }
+    let safe: Vec<(String, String)> = std::env::vars()
+        .filter(|(key, _)| !shell_env_is_secret(key))
+        .collect();
+    command.env_clear().envs(safe);
+}
 fn allowed_command(command: &str) -> bool {
     if std::env::var("LUCY_ALLOW_DANGEROUS").ok().as_deref() == Some("1") {
         return true;
@@ -103,7 +122,7 @@ impl Tool for ShellTool {
         "shell"
     }
     fn description(&self) -> &str {
-        "Run a shell command in Lucy's working directory. Destructive system-wide commands are blocked unless LUCY_ALLOW_DANGEROUS=1."
+        "Run a shell command in Lucy's working directory. Secrets are removed from the child environment by default; set LUCY_ALLOW_INHERITED_SECRETS=1 only for trusted workflows."
     }
     fn parameters_schema(&self) -> Value {
         serde_json::json!({"type":"object","properties":{"command":{"type":"string","description":"Shell command to execute"},"intent":{"type":"string","description":"Why this tool call is needed"}},"required":["command","intent"]})
@@ -122,7 +141,9 @@ impl Tool for ShellTool {
         let mut child = tokio::process::Command::new("sh")
             .arg("-lc")
             .arg(command)
-            .current_dir(&working_dir)
+            .current_dir(&working_dir);
+        apply_shell_environment(&mut child);
+        let mut child = child
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()?;
