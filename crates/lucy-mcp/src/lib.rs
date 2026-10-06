@@ -241,13 +241,45 @@ fn sanitize(s: &str) -> String {
         .collect()
 }
 
+fn split_command_args(input: &str) -> Option<Vec<String>> {
+    let mut args = Vec::new();
+    let mut current = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in input.chars() {
+        if escaped {
+            current.push(ch);
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' => escaped = true,
+            '"' | '\'' if quote == Some(ch) => quote = None,
+            '"' | '\'' if quote.is_none() => quote = Some(ch),
+            c if c.is_whitespace() && quote.is_none() => {
+                if !current.is_empty() {
+                    args.push(std::mem::take(&mut current));
+                }
+            }
+            c => current.push(c),
+        }
+    }
+    if escaped || quote.is_some() {
+        return None;
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Some(args)
+}
+
 pub fn computer_use_config() -> McpServerConfig {
     McpServerConfig {
         name: "computer_use".into(),
         command: std::env::var("LUCY_COMPUTER_USE_COMMAND").unwrap_or_else(|_| "npx".into()),
         args: std::env::var("LUCY_COMPUTER_USE_ARGS")
             .ok()
-            .and_then(|v| shell_words::split(&v).ok())
+            .and_then(|v| split_command_args(&v))
             .unwrap_or_else(|| vec!["-y".into(), "@zavora-ai/computer-use-mcp".into()]),
         env: HashMap::new(),
     }
