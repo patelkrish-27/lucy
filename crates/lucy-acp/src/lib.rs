@@ -9,7 +9,7 @@ use agent_client_protocol::schema::v1::{
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
     SelectedPermissionOutcome, SessionNotification, TextContent,
 };
-use agent_client_protocol::{AcpAgent, Agent, Client, ConnectionTo, Error, Responder};
+use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, Client, ConnectionTo, Error, Responder};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -69,13 +69,10 @@ impl AcpRunner {
     }
 
     fn acp_agent(&self) -> Result<AcpAgent> {
-        let mut command = self.command.clone();
-        if !self.args.is_empty() {
-            command.push(' ');
-            command.push_str(&self.args.join(" "));
-        }
-        AcpAgent::from_str(&command)
-            .with_context(|| format!("invalid ACP runner command: {}", self.command_line()))
+        let config = AcpAgentConfig::new(self.command.clone())
+            .args(self.args.clone())
+            .envs(self.env.clone());
+        Ok(AcpAgent::new(config))
     }
 
     pub async fn prompt(&self, prompt: &str) -> Result<AcpResult> {
@@ -194,10 +191,15 @@ impl AcpRunner {
     pub fn from_command_line(command: &str) -> Result<Self> {
         let command = command.trim();
         anyhow::ensure!(!command.is_empty(), "ACP runner command cannot be empty");
-        let mut parts = command.split_whitespace();
-        let executable = parts.next().unwrap().to_owned();
-        let args = parts.map(str::to_owned).collect::<Vec<_>>();
-        Ok(Self::new(executable, args))
+        let agent = AcpAgent::from_str(command)
+            .with_context(|| format!("invalid ACP runner command: {command}"))?;
+        let config = agent.into_config();
+        let mut runner = Self::new(
+            config.command().to_string_lossy().to_string(),
+            config.arguments().iter().cloned().collect::<Vec<_>>(),
+        );
+        runner.env = config.environment().iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        Ok(runner)
     }
 
     pub fn workspace(self, path: &Path) -> Self {
