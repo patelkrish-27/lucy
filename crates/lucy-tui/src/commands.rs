@@ -41,6 +41,9 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
     ("/export", "export session — /export <file.json>"),
     ("/usage", "show token usage"),
     ("/doctor", "run config checks"),
+    ("/memory", "memory hub — /memory [status|search <query>|slim|assets]"),
+    ("/wiki-ingest", "index Markdown into memory — /wiki-ingest <file>"),
+    ("/codegraph", "index Rust symbols — /codegraph <file>"),
     ("/help", "show help (F2)"),
     ("/settings", "open settings (Ctrl+,)"),
     ("/quit", "quit lucy"),
@@ -52,7 +55,7 @@ pub(crate) const COMMANDS: &[(&str, &str)] = &[
 ///
 /// Models and providers are named here by pointing at `/settings`, the one
 /// place that changes them.
-const HELP_TEXT: &str = "Lucy › Available commands\n\n- /help — show this help\n- /clear — clear session history\n- /settings — model, provider, permissions (Ctrl+,)\n- /compact — trim history into a summary\n- /agent <goal> — run the ReAct loop\n- /usage — show token usage\n- /doctor — run config checks\n\nKeys\n\n- F2 hold-to-talk voice\n- PgUp/PgDn scroll\n- Esc cancel/quit";
+const HELP_TEXT: &str = "Lucy › Available commands\n\n- /help — show this help\n- /clear — clear session history\n- /settings — model, provider, permissions (Ctrl+,)\n- /compact — trim history into a summary\n- /agent <goal> — run the ReAct loop\n- /usage — show token usage\n- /doctor — run config checks\n- /memory — layered memory status/search/slim/assets\n- /wiki-ingest <file> — index Markdown knowledge\n- /codegraph <file> — index Rust symbols\n\nKeys\n\n- F2 hold-to-talk voice\n- PgUp/PgDn scroll\n- Esc cancel/quit";
 
 /// Commands matching the current input, for the `/` suggestion popup.
 ///
@@ -464,6 +467,83 @@ pub(crate) async fn handle_slash(
                 rt.approval_gate().always_allowed_tools().len()
             ));
             app.push_msg(ChatMsg::lucy(out.trim_end().to_owned()));
+            true
+        }
+        "/memory" => {
+            let parts = arg.trim().splitn(2, ' ');
+            match parts.next().unwrap_or("status") {
+                "" | "status" => {
+                    let s = rt.memory_hub().stats().await;
+                    app.push_msg(ChatMsg::lucy(format!(
+                        "Memory Hub — L0 conversation: {} · L1 atoms: {} · L2 scenarios: {} · L3 persona: {} · assets: {}",
+                        s.conversation, s.atom, s.scenario, s.persona, s.assets
+                    )));
+                }
+                "search" => {
+                    let query = parts.next().unwrap_or("").trim();
+                    if query.is_empty() {
+                        app.push_msg(ChatMsg::system("Usage: /memory search <query>".into()));
+                    } else {
+                        let hits = rt.memory_hub().search(query, 8).await;
+                        if hits.is_empty() {
+                            app.push_msg(ChatMsg::system("Memory: no matches".into()));
+                        } else {
+                            let mut out = String::from("Lucy › Memory recall\n\n");
+                            for hit in hits {
+                                out.push_str(&format!("- [{}] {} — {}\n", format!("{:?}", hit.layer).to_lowercase(), hit.title, hit.content));
+                            }
+                            app.push_msg(ChatMsg::lucy(out.trim_end().to_owned()));
+                        }
+                    }
+                }
+                "slim" => {
+                    match rt.memory_hub().slim().await {
+                        Ok((before, after, removed)) => app.push_msg(ChatMsg::lucy(format!(
+                            "Memory slim complete — removed {removed} duplicate atom(s); {} → {} total memory records",
+                            before.conversation + before.atom + before.scenario + before.persona,
+                            after.conversation + after.atom + after.scenario + after.persona
+                        ))),
+                        Err(e) => app.push_msg(ChatMsg::system(format!("Memory slim failed: {e}"))),
+                    }
+                }
+                "assets" => {
+                    let assets = rt.memory_hub().assets(None).await;
+                    if assets.is_empty() {
+                        app.push_msg(ChatMsg::system("Memory Hub: no assets registered".into()));
+                    } else {
+                        let mut out = String::from("Lucy › Memory assets\n\n");
+                        for asset in assets {
+                            out.push_str(&format!("- [{:?}] {} v{} ({})\n", asset.kind, asset.name, asset.version, asset.visibility));
+                        }
+                        app.push_msg(ChatMsg::lucy(out.trim_end().to_owned()));
+                    }
+                }
+                other => app.push_msg(ChatMsg::system(format!(
+                    "Unknown memory action '{other}' — use /memory [status|search <query>|slim|assets]"
+                ))),
+            }
+            true
+        }
+        "/wiki-ingest" => {
+            if arg.trim().is_empty() {
+                app.push_msg(ChatMsg::system("Usage: /wiki-ingest <file.md>".into()));
+            } else {
+                match rt.memory_hub().ingest_wiki(std::path::PathBuf::from(arg.trim())).await {
+                    Ok(n) => app.push_msg(ChatMsg::lucy(format!("Wiki indexed — {n} section(s) added to Memory Hub"))),
+                    Err(e) => app.push_msg(ChatMsg::system(format!("Wiki ingest failed: {e}"))),
+                }
+            }
+            true
+        }
+        "/codegraph" => {
+            if arg.trim().is_empty() {
+                app.push_msg(ChatMsg::system("Usage: /codegraph <file.rs>".into()));
+            } else {
+                match rt.memory_hub().index_rust_file(std::path::PathBuf::from(arg.trim())).await {
+                    Ok(n) => app.push_msg(ChatMsg::lucy(format!("CodeGraph indexed — {n} Rust symbol(s)"))),
+                    Err(e) => app.push_msg(ChatMsg::system(format!("CodeGraph indexing failed: {e}"))),
+                }
+            }
             true
         }
         "/knowledge" => {
