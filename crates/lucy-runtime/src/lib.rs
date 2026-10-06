@@ -491,6 +491,9 @@ impl LucyRuntime {
         if let Err(e) = self.user_model.update(&session_event).await {
             tracing::warn!(error=%e, "user model update failed");
         }
+        // L0 is raw conversation memory: durable, searchable on demand, and
+        // deliberately not injected wholesale into every prompt.
+        let _ = self.memory_hub.remember_conversation("user", &indexable_text(&indexable), &owner_id.0.to_string()).await;
         Ok(())
     }
     /// Persist an assistant reply locally (no LLM call).
@@ -512,6 +515,7 @@ impl LucyRuntime {
         if let Err(e) = self.session_search.index_event(&session_event).await {
             tracing::warn!(error=%e, "session search indexing failed");
         }
+        let _ = self.memory_hub.remember_conversation("assistant", &indexable_text(&indexable), &owner_id.0.to_string()).await;
         Ok(())
     }
     /// **Step 1 + Step 2.** Route a turn through the classification model and
@@ -1335,6 +1339,14 @@ pub fn friendly_main_error(raw: &str) -> String {
         raw.to_string()
     } else {
         format!("LLM request failed: {raw}")
+    }
+}
+
+fn indexable_text(message: &TurnMessage) -> String {
+    match message {
+        TurnMessage::User(text) => text.clone(),
+        TurnMessage::Assistant(turn) => turn.text.clone().unwrap_or_default(),
+        TurnMessage::Tool(tool) => tool.output.to_string(),
     }
 }
 
