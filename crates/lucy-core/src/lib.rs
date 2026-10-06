@@ -601,6 +601,50 @@ impl ToolContext {
             path.to_path_buf()
         }
     }
+
+    /// Resolve a filesystem path inside the current workspace boundary.
+    /// File tools use this stricter variant so an agent cannot escape via
+    /// absolute paths, `..`, or a symlink that points outside the workspace.
+    /// For writes, the nearest existing parent is canonicalized first.
+    pub fn resolve_path_checked(&self, path: &Path) -> anyhow::Result<PathBuf> {
+        let root = self.working_dir.clone().unwrap_or(std::env::current_dir()?);
+        let root = std::fs::canonicalize(&root).map_err(|e| {
+            anyhow::anyhow!("workspace root is unavailable: {}: {e}", root.display())
+        })?;
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let canonical = match std::fs::canonicalize(&candidate) {
+            Ok(existing) => existing,
+            Err(_) => {
+                let mut ancestor = candidate.clone();
+                let mut missing = Vec::new();
+                while !ancestor.exists() {
+                    if let Some(name) = ancestor.file_name() {
+                        missing.push(name.to_os_string());
+                    }
+                    if !ancestor.pop() {
+                        return Err(anyhow::anyhow!(
+                            "path cannot be resolved safely: {}", candidate.display()
+                        ));
+                    }
+                }
+                let mut resolved = std::fs::canonicalize(&ancestor)?;
+                for name in missing.iter().rev() {
+                    resolved.push(name);
+                }
+                resolved
+            }
+        };
+        if !canonical.starts_with(&root) {
+            return Err(anyhow::anyhow!(
+                "path escapes Lucy's workspace: {}", path.display()
+            ));
+        }
+        Ok(canonical)
+    }
 }
 #[derive(Debug, Error)]
 pub enum LucyError {
