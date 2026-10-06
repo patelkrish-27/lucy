@@ -138,13 +138,13 @@ impl GatewayState {
         self.devices.lock().await.is_paired()
     }
 
-    async fn begin_task(&self, task_id: &str) -> bool {
+    async fn begin_task(self: &Arc<Self>, task_id: &str) -> Option<TaskGuard> {
         let mut guard = self.running_task.lock().await;
         if guard.is_some() {
-            return false;
+            return None;
         }
         *guard = Some(task_id.to_string());
-        true
+        Some(TaskGuard { state: Arc::clone(self) })
     }
 
     async fn end_task(&self) {
@@ -153,6 +153,21 @@ impl GatewayState {
 
     async fn running_task(&self) -> Option<String> {
         self.running_task.lock().await.clone()
+    }
+}
+
+/// Owns the global task slot. Dropping it schedules cleanup even when a task
+/// future unwinds unexpectedly, so a panic cannot permanently wedge the gateway.
+struct TaskGuard {
+    state: Arc<GatewayState>,
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            state.end_task().await;
+        });
     }
 }
 
@@ -314,7 +329,7 @@ async fn submit_task(
             .into_response();
     }
     let task_id = format!("rest-{}", Uuid::new_v4());
-    if !state.begin_task(&task_id).await {
+    let Some(_task_guard) = state.begin_task(&task_id).await else {
         return (
             StatusCode::CONFLICT,
             Json(json!({"error": "another task is already running"})),
@@ -322,7 +337,6 @@ async fn submit_task(
             .into_response();
     }
     let result = run_task_once(&state, &prompt).await;
-    state.end_task().await;
     match result {
         Ok((summary, complete)) => {
             Json(json!({"summary": summary, "complete": complete})).into_response()
@@ -687,7 +701,7 @@ async fn connection_loop(state: Arc<GatewayState>, mut socket: WebSocket) {
                 state.host.touch();
                 if is_terminal {
                     current_task = None;
-                    state.end_task().await;
+
                 }
             }
         }
