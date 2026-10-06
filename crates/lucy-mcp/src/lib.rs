@@ -213,11 +213,21 @@ pub fn register_server_with_defs(
     let client = StdioMcpClient::new(config.clone());
     let mut count = 0;
     for definition in defs {
-        let full_name = format!(
+        let base_name = format!(
             "mcp_{}_{}",
             sanitize(&config.name),
             sanitize(&definition.name)
         );
+        // Never let an MCP server overwrite an existing tool. Sanitization can
+        // collapse distinct names (for example "foo-bar" and "foo_bar"), and a
+        // malicious/buggy server could otherwise shadow a built-in or another
+        // server's tool.
+        let mut full_name = base_name.clone();
+        let mut suffix = 2usize;
+        while registry.get(&full_name).is_some() {
+            full_name = format!("{base_name}_{suffix}");
+            suffix = suffix.saturating_add(1);
+        }
         let bare_name = definition.name.clone();
         registry.register_arc(Arc::new(McpToolProxy {
             client: client.clone(),
