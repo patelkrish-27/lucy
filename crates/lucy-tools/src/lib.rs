@@ -706,6 +706,18 @@ mod tests {
     }
 
     #[test]
+    fn shell_env_secret_classifier_is_conservative() {
+        assert!(shell_env_is_secret("OPENAI_API_KEY"));
+        assert!(shell_env_is_secret("GITHUB_TOKEN"));
+        assert!(shell_env_is_secret("AWS_SECRET_ACCESS_KEY"));
+        assert!(shell_env_is_secret("DB_PASSWORD"));
+        assert!(shell_env_is_secret("SSH_PRIVATE_KEY"));
+        assert!(!shell_env_is_secret("PATH"));
+        assert!(!shell_env_is_secret("LANG"));
+        assert!(!shell_env_is_secret("RUST_LOG"));
+    }
+
+    #[test]
     fn shell_blocks_destructive_commands() {
         assert!(!allowed_command("rm -rf / --no-preserve-root"));
         assert!(allowed_command("ls -la"));
