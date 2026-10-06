@@ -7,4 +7,5 @@ license.workspace = true
 [dependencies]
 agent-client-protocol = { version = "2.2.0", default-features = false, features = ["process"] }
 anyhow.workspace = true
+lucy-core = { path = "../lucy-core" }
 tokio.workspace = true
