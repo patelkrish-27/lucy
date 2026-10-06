@@ -536,6 +536,7 @@ async fn connection_loop(state: Arc<GatewayState>, mut socket: WebSocket) {
     // those events.
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ServerMessage>();
     let mut current_task: Option<String> = None;
+    let mut task_guard: Option<TaskGuard> = None;
 
     loop {
         tokio::select! {
@@ -569,13 +570,14 @@ async fn connection_loop(state: Arc<GatewayState>, mut socket: WebSocket) {
                             continue;
                         }
                         let task_id = id.unwrap_or_else(|| Uuid::new_v4().to_string());
-                        if !state.begin_task(&task_id).await {
+                        let Some(guard) = state.begin_task(&task_id).await else {
                             let _ = send(&mut socket, &ServerMessage::Error {
                                 message: "another client is running a task".into(),
                                 code: Some("busy".into()),
                             }).await;
                             continue;
                         }
+                        task_guard = Some(guard);
                         current_task = Some(task_id.clone());
                         let _ = send(&mut socket, &ServerMessage::TaskStarted {
                             task_id: task_id.clone(),
@@ -701,7 +703,7 @@ async fn connection_loop(state: Arc<GatewayState>, mut socket: WebSocket) {
                 state.host.touch();
                 if is_terminal {
                     current_task = None;
-
+                    task_guard = None;
                 }
             }
         }
