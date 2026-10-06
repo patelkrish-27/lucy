@@ -20,6 +20,7 @@ members = [
   "crates/lucy-scheduler",
   "crates/lucy-spaces",
   "crates/lucy-tasks",
+  "crates/lucy-acp",
 ]
 
 [workspace.package]
