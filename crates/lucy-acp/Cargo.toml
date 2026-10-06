@@ -1,0 +1,10 @@
+[package]
+name = "lucy-acp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-client-protocol = { version = "2.2.0", default-features = false, features = ["process"] }
+anyhow.workspace = true
+tokio.workspace = true
