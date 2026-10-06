@@ -53,7 +53,7 @@ pub struct GatewayState {
     config: LucyConfig,
     /// Live task count, for `/health` and to make "one task at a time" a
     /// deliberate refusal rather than a race.
-    running_task: Mutex<Option<String>>,
+    running_task: std::sync::Mutex<Option<String>>,
 }
 
 impl GatewayState {
@@ -139,7 +139,7 @@ impl GatewayState {
     }
 
     async fn begin_task(self: &Arc<Self>, task_id: &str) -> Option<TaskGuard> {
-        let mut guard = self.running_task.lock().await;
+        let mut guard = self.running_task.lock().expect("running task mutex poisoned");
         if guard.is_some() {
             return None;
         }
@@ -147,12 +147,12 @@ impl GatewayState {
         Some(TaskGuard { state: Arc::clone(self) })
     }
 
-    async fn end_task(&self) {
-        *self.running_task.lock().await = None;
+    fn end_task(&self) {
+        *self.running_task.lock().expect("running task mutex poisoned") = None;
     }
 
-    async fn running_task(&self) -> Option<String> {
-        self.running_task.lock().await.clone()
+    fn running_task(&self) -> Option<String> {
+        self.running_task.lock().expect("running task mutex poisoned").clone()
     }
 }
 
@@ -164,10 +164,9 @@ struct TaskGuard {
 
 impl Drop for TaskGuard {
     fn drop(&mut self) {
-        let state = Arc::clone(&self.state);
-        tokio::spawn(async move {
-            state.end_task().await;
-        });
+        // This mutex is intentionally synchronous and tiny so cleanup is
+        // deterministic even while unwinding; there is no async work to await.
+        self.state.end_task();
     }
 }
 
@@ -189,7 +188,7 @@ pub fn router(state: Arc<GatewayState>) -> Router {
 // ---------------------------------------------------------------------------
 
 async fn health(State(state): State<Arc<GatewayState>>) -> impl IntoResponse {
-    let running = state.running_task().await;
+    let running = state.running_task();
     Json(json!({
         "ok": true,
         "server": "lucy-gateway",
