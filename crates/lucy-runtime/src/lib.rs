@@ -385,6 +385,7 @@ impl LucyRuntime {
         registry.register(KbSearchTool::new(self.knowledge.clone()));
         registry.register(KbGetTool::new(self.knowledge.clone()));
         registry.register(lucy_knowledge::tools::MemorySearchTool::new(self.memory_hub.clone()));
+        registry.register(lucy_knowledge::tools::MemoryRecallTool::new(self.memory_hub.clone(), self.knowledge.clone()));
         registry.register(lucy_knowledge::tools::MemoryStatusTool::new(self.memory_hub.clone()));
         registry.register(lucy_knowledge::tools::MemoryAssetsTool::new(self.memory_hub.clone()));
         registry.register(lucy_knowledge::tools::MemorySlimTool::new(self.memory_hub.clone()));
