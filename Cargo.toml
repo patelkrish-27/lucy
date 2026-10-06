@@ -6,12 +6,20 @@ members = [
   "crates/lucy-tools",
   "crates/lucy-mcp",
   "crates/lucy-hyprfast",
+  "crates/lucy-mascot",
   "crates/lucy-runtime",
   "crates/lucy-tui",
   "crates/lucy-cli",
   "crates/lucy-stt",
   "crates/lucy-config",
   "crates/lucy-adk",
+  "crates/lucy-knowledge",
+  "crates/lucy-systemone",
+  "crates/lucy-gateway",
+  "crates/lucy-skills",
+  "crates/lucy-scheduler",
+  "crates/lucy-spaces",
+  "crates/lucy-tasks",
 ]
 
 [workspace.package]
@@ -23,10 +31,13 @@ authors = ["Krish Patel"]
 [workspace.dependencies]
 anyhow = "1"
 async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+lucy-scheduler = { path = "crates/lucy-scheduler" }
 cpal = "0.16"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
 hound = "3.5"
+image = { version = "0.25", default-features = false, features = ["png"] }
 ratatui = "0.30"
 reqwest = { version = "0.12", default-features = false, features = ["multipart", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
@@ -37,6 +48,16 @@ toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+
+lucy-skills = { path = "crates/lucy-skills" }
+
+[profile.dev]
+debug = 1
+incremental = false
+
+[profile.test]
+debug = 1
+incremental = false
 
 [profile.release]
 opt-level = 3

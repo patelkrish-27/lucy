@@ -1,0 +1,32 @@
+[package]
+name = "lucy-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Mobile gateway: local WebSocket + REST server for the Lucy app"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+lucy-config = { path = "../lucy-config" }
+lucy-core = { path = "../lucy-core" }
+lucy-runtime = { path = "../lucy-runtime" }
+lucy-adk = { path = "../lucy-adk" }
+
+axum = { version = "0.8", features = ["ws", "json", "tokio", "http1"] }
+qrcode = { version = "0.14", default-features = false }
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net"] }
+reqwest = { workspace = true }
+tokio-tungstenite = "0.28"
+futures = { workspace = true }

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Widget Store Search</title></head>
+<body>
+<h1>Widget Store</h1>
+<input id="q" type="text" role="searchbox" aria-label="Search widgets" placeholder="Search widgets">
+<div id="suggest" role="listbox" aria-label="Suggestions" hidden></div>
+<ul id="results"></ul>
+<div id="outcome" aria-live="polite"></div>
+<script>
+const ITEMS = ["Nebula Widget", "Nebula Widget Pro", "Solar Gadget", "Lunar Doohickey"];
+const q = document.getElementById('q');
+const sug = document.getElementById('suggest');
+const res = document.getElementById('results');
+const out = document.getElementById('outcome');
+function render(list) {
+  // SPA shape: results list is fully re-rendered (new DOM nodes) on update.
+  res.innerHTML = '';
+  list.forEach(name => {
+    const li = document.createElement('li');
+    const b = document.createElement('button');
+    b.textContent = name;
+    b.addEventListener('click', () => {
+      document.title = name + ' \u2014 Widget Store';
+      out.textContent = 'Opened: ' + name;
+    });
+    li.appendChild(b);
+    res.appendChild(li);
+  });
+}
+// Suggestion nodes are replaced on every keystroke (stale-ID shape).
+q.addEventListener('input', () => {
+  const v = q.value.toLowerCase();
+  const m = ITEMS.filter(n => n.toLowerCase().includes(v));
+  sug.innerHTML = '';
+  if (q.value && m.length) {
+    sug.hidden = false;
+    m.forEach(name => {
+      const o = document.createElement('div');
+      o.setAttribute('role', 'option');
+      o.textContent = name;
+      o.style.cursor = 'pointer';
+      o.style.padding = '4px';
+      o.addEventListener('click', () => { q.value = name; sug.hidden = true; render([name]); });
+      sug.appendChild(o);
+    });
+  } else {
+    sug.hidden = true;
+  }
+});
+q.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    render(ITEMS.filter(n => n.toLowerCase().includes(q.value.toLowerCase())));
+    sug.hidden = true;
+  }
+});
+render(ITEMS);
+</script>
+</body>
+</html>

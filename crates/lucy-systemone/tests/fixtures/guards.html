@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Guard Probes</title></head>
+<body>
+<h1>Guard probes</h1>
+<div style="position:relative; display:inline-block;">
+  <button id="covered">Covered action</button>
+  <!-- Overlay only over the first button -->
+  <div id="overlay" style="position:absolute;inset:0;background:rgba(0,0,0,0.5);"></div>
+</div>
+<button id="replace-me" style="position:relative; z-index: 10;">Replace me</button>
+<div id="outcome" aria-live="polite"></div>
+<script>
+// Delegated so cloned nodes retain behavior.
+document.addEventListener('click', (e) => {
+  if (e.target.id === 'covered') document.getElementById('outcome').textContent = 'covered-clicked';
+  if (e.target.id === 'replace-me') document.getElementById('outcome').textContent = 'replaced-clicked';
+});
+</script>
+</body>
+</html>

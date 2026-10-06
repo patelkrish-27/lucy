@@ -12,10 +12,25 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 adk-core = "2.2.0"
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "sqlite",
+  "chrono",
+] }
 lucy-adk = { path = "../lucy-adk" }
 lucy-agent = { path = "../lucy-agent" }
 lucy-core = { path = "../lucy-core" }
 lucy-config = { path = "../lucy-config" }
-lucy-hyprfast = { path = "../lucy-hyprfast" }
-lucy-mcp = { path = "../lucy-mcp" }
+lucy-knowledge = { path = "../lucy-knowledge" }
 lucy-tools = { path = "../lucy-tools" }
+lucy-mcp = { path = "../lucy-mcp" }
+lucy-hyprfast = { path = "../lucy-hyprfast" }
+lucy-systemone = { path = "../lucy-systemone" }
+
+[dev-dependencies]
+async-trait.workspace = true
+toml.workspace = true
+serde_json.workspace = true
+lucy-config = { path = "../lucy-config" }
+# Canned model answers so the agent loop's LLM budget is assertable.
+lucy-agent = { path = "../lucy-agent", features = ["testing"] }

@@ -27,6 +27,8 @@ pub(crate) struct Recording {
 }
 
 // Stop recording and dispatch transcription. Safe to call with hold == None.
+// Plays the ack beep so a voice command feels accepted even before the
+// transcript lands (whiteboard: `own STT / play TTS beep`).
 pub(crate) fn stop_recording(
     hold: &mut Option<Recording>,
     stt: Option<&Arc<GroqStt>>,
@@ -35,6 +37,7 @@ pub(crate) fn stop_recording(
 ) {
     if let Some(rec) = hold.take() {
         app.listening = false;
+        lucy_stt::ack_beep();
         if let Some(stt) = stt {
             let stt = Arc::clone(stt);
             let tx = voice_tx.clone();

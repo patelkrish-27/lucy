@@ -9,9 +9,13 @@ anyhow.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 lucy-core = { path = "../lucy-core" }
 lucy-runtime = { path = "../lucy-runtime" }
 lucy-stt = { path = "../lucy-stt" }
 lucy-config = { path = "../lucy-config" }
+lucy-agent = { path = "../lucy-agent" }
+lucy-systemone = { path = "../lucy-systemone" }
+lucy-mascot = { path = "../lucy-mascot" }
 serde_json.workspace = true
 

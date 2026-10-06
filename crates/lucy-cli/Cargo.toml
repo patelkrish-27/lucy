@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 toml.workspace = true
 tracing.workspace = true
@@ -18,7 +19,13 @@ tracing-subscriber.workspace = true
 lucy-agent = { path = "../lucy-agent" }
 lucy-adk = { path = "../lucy-adk" }
 lucy-core = { path = "../lucy-core" }
+lucy-hyprfast = { path = "../lucy-hyprfast" }
 lucy-tools = { path = "../lucy-tools" }
 lucy-tui = { path = "../lucy-tui" }
 lucy-stt = { path = "../lucy-stt" }
 lucy-config = { path = "../lucy-config" }
+lucy-runtime = { path = "../lucy-runtime" }
+lucy-systemone = { path = "../lucy-systemone" }
+lucy-mascot = { path = "../lucy-mascot" }
+lucy-gateway = { path = "../lucy-gateway" }
+reqwest.workspace = true

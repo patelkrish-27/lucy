@@ -1,0 +1,374 @@
+{
+  "Cargo.toml": {
+    "mtime": 1790087328.1722589,
+    "seen": 1790403416.605276,
+    "ast_hash": "c642302479d09bad99d0cd2103a4df97",
+    "semantic_hash": "c642302479d09bad99d0cd2103a4df97"
+  },
+  "crates/lucy-adk/Cargo.toml": {
+    "mtime": 1789838949.3166258,
+    "seen": 1790403416.605283,
+    "ast_hash": "e645b3422cb4f8ade0829aa50bb2d3a2",
+    "semantic_hash": "e645b3422cb4f8ade0829aa50bb2d3a2"
+  },
+  "crates/lucy-adk/src/execution.rs": {
+    "mtime": 1790182405.2366636,
+    "seen": 1790403416.6052864,
+    "ast_hash": "40fd58b539b8aa32098eabf753fe204c",
+    "semantic_hash": "40fd58b539b8aa32098eabf753fe204c"
+  },
+  "crates/lucy-adk/src/lib.rs": {
+    "mtime": 1790182405.2516625,
+    "seen": 1790403416.6052878,
+    "ast_hash": "f15b47b6e81546401e9b0bba151a3299",
+    "semantic_hash": "f15b47b6e81546401e9b0bba151a3299"
+  },
+  "crates/lucy-adk/src/session.rs": {
+    "mtime": 1790182405.259662,
+    "seen": 1790403416.6052887,
+    "ast_hash": "704689d085c5527c902c362ef1ed3d11",
+    "semantic_hash": "704689d085c5527c902c362ef1ed3d11"
+  },
+  "crates/lucy-agent/Cargo.toml": {
+    "mtime": 1790087328.1724653,
+    "seen": 1790403416.6052897,
+    "ast_hash": "6c01c5ebc153a43e43235d4ded9f9bc4",
+    "semantic_hash": "6c01c5ebc153a43e43235d4ded9f9bc4"
+  },
+  "crates/lucy-agent/src/lib.rs": {
+    "mtime": 1790087328.1724653,
+    "seen": 1790403416.605291,
+    "ast_hash": "b1f99fe594bf47fd4b398c823b450da1",
+    "semantic_hash": "b1f99fe594bf47fd4b398c823b450da1"
+  },
+  "crates/lucy-agent/src/provider.rs": {
+    "mtime": 1790182405.2706609,
+    "seen": 1790403416.6052918,
+    "ast_hash": "b5ba783d929b78af8bfb8f5c0daffebd",
+    "semantic_hash": "b5ba783d929b78af8bfb8f5c0daffebd"
+  },
+  "crates/lucy-cli/Cargo.toml": {
+    "mtime": 1790087328.1724653,
+    "seen": 1790403416.6052926,
+    "ast_hash": "1f534eafa25be2c263c5f996cf1c1379",
+    "semantic_hash": "1f534eafa25be2c263c5f996cf1c1379"
+  },
+  "crates/lucy-cli/src/main.rs": {
+    "mtime": 1790245292.368656,
+    "seen": 1790403416.6052935,
+    "ast_hash": "33ffacf11bb4d9f5dadc3d06002dcd7a",
+    "semantic_hash": "33ffacf11bb4d9f5dadc3d06002dcd7a"
+  },
+  "crates/lucy-config/Cargo.toml": {
+    "mtime": 1789363222.7340589,
+    "seen": 1790403416.6052942,
+    "ast_hash": "8e065703645fa5fd5d8c687b3f12399b",
+    "semantic_hash": "8e065703645fa5fd5d8c687b3f12399b"
+  },
+  "crates/lucy-config/src/lib.rs": {
+    "mtime": 1790242186.8947532,
+    "seen": 1790403416.6052957,
+    "ast_hash": "a97d192f93e27e15376c43b7f3e707ba",
+    "semantic_hash": "a97d192f93e27e15376c43b7f3e707ba"
+  },
+  "crates/lucy-core/Cargo.toml": {
+    "mtime": 1789213644.5388389,
+    "seen": 1790403416.6052964,
+    "ast_hash": "79cb683e6d16cca11e208089ec0b387f",
+    "semantic_hash": "79cb683e6d16cca11e208089ec0b387f"
+  },
+  "crates/lucy-core/src/lib.rs": {
+    "mtime": 1790182405.3336558,
+    "seen": 1790403416.6052973,
+    "ast_hash": "6a8ffc1e68d3a37647fcad9e75155e5f",
+    "semantic_hash": "6a8ffc1e68d3a37647fcad9e75155e5f"
+  },
+  "crates/lucy-core/src/session.rs": {
+    "mtime": 1790182405.3376555,
+    "seen": 1790403416.6052983,
+    "ast_hash": "0aa0af24105625ef496bdb9fdc07ca09",
+    "semantic_hash": "0aa0af24105625ef496bdb9fdc07ca09"
+  },
+  "crates/lucy-hyprfast/Cargo.toml": {
+    "mtime": 1789470143.6621683,
+    "seen": 1790403416.605299,
+    "ast_hash": "9c45ed78c2dd86cf163753353493153d",
+    "semantic_hash": "9c45ed78c2dd86cf163753353493153d"
+  },
+  "crates/lucy-hyprfast/src/lib.rs": {
+    "mtime": 1790240896.6832526,
+    "seen": 1790403416.6053,
+    "ast_hash": "8e1cf623b450efeda809b0f7e590aebc",
+    "semantic_hash": "8e1cf623b450efeda809b0f7e590aebc"
+  },
+  "crates/lucy-mcp/Cargo.toml": {
+    "mtime": 1789363222.7357059,
+    "seen": 1790403416.6053007,
+    "ast_hash": "0643e64c5cbf06f106567962f669ec04",
+    "semantic_hash": "0643e64c5cbf06f106567962f669ec04"
+  },
+  "crates/lucy-mcp/src/lib.rs": {
+    "mtime": 1790182405.4106498,
+    "seen": 1790403416.6053019,
+    "ast_hash": "b7e7be99334a9cc31143db1613b04177",
+    "semantic_hash": "b7e7be99334a9cc31143db1613b04177"
+  },
+  "crates/lucy-runtime/Cargo.toml": {
+    "mtime": 1790087328.1734004,
+    "seen": 1790403416.6053026,
+    "ast_hash": "9d4a896802cc75962d46814c3ade0b6a",
+    "semantic_hash": "9d4a896802cc75962d46814c3ade0b6a"
+  },
+  "crates/lucy-runtime/src/lib.rs": {
+    "mtime": 1790241848.5634854,
+    "seen": 1790403416.6053033,
+    "ast_hash": "b0cc2ba358106b4bd6897a0f422b1153",
+    "semantic_hash": "b0cc2ba358106b4bd6897a0f422b1153"
+  },
+  "crates/lucy-runtime/src/memory.rs": {
+    "mtime": 1790182405.4566462,
+    "seen": 1790403416.605304,
+    "ast_hash": "7e89f3a4ffc59a1f67c58bcf92997579",
+    "semantic_hash": "7e89f3a4ffc59a1f67c58bcf92997579"
+  },
+  "crates/lucy-runtime/src/router.rs": {
+    "mtime": 1790241848.5724854,
+    "seen": 1790403416.6053052,
+    "ast_hash": "e683a4852b3b30c8e9fb78f9d380d0db",
+    "semantic_hash": "e683a4852b3b30c8e9fb78f9d380d0db"
+  },
+  "crates/lucy-runtime/src/sessions.rs": {
+    "mtime": 1790182405.484644,
+    "seen": 1790403416.6053061,
+    "ast_hash": "6bd6ab126c7d3d6c48ef297a12e44b40",
+    "semantic_hash": "6bd6ab126c7d3d6c48ef297a12e44b40"
+  },
+  "crates/lucy-stt/Cargo.toml": {
+    "mtime": 1789470143.6645496,
+    "seen": 1790403416.6053069,
+    "ast_hash": "032679666c431a1161cb7e05d15569e6",
+    "semantic_hash": "032679666c431a1161cb7e05d15569e6"
+  },
+  "crates/lucy-stt/src/lib.rs": {
+    "mtime": 1790182405.509642,
+    "seen": 1790403416.6053076,
+    "ast_hash": "e93d79c952f7d5a8c28d93a4419513a4",
+    "semantic_hash": "e93d79c952f7d5a8c28d93a4419513a4"
+  },
+  "crates/lucy-systemone/Cargo.toml": {
+    "mtime": 1790098769.4442291,
+    "seen": 1790403416.6053088,
+    "ast_hash": "e1da245fd1144333efd187ea1c27888e",
+    "semantic_hash": "e1da245fd1144333efd187ea1c27888e"
+  },
+  "crates/lucy-systemone/src/automation.rs": {
+    "mtime": 1790247611.171909,
+    "seen": 1790403416.6053097,
+    "ast_hash": "c4103ee4695778832cc0a37f7c9d9a6c",
+    "semantic_hash": "c4103ee4695778832cc0a37f7c9d9a6c"
+  },
+  "crates/lucy-systemone/src/bridge.rs": {
+    "mtime": 1790182405.5666373,
+    "seen": 1790403416.6053104,
+    "ast_hash": "318653ed89752e4bb6e3393ab401606a",
+    "semantic_hash": "318653ed89752e4bb6e3393ab401606a"
+  },
+  "crates/lucy-systemone/src/browser_cdp.rs": {
+    "mtime": 1790247611.1939113,
+    "seen": 1790403416.6053112,
+    "ast_hash": "d28a7fdb4d180118b5831a0440814536",
+    "semantic_hash": "d28a7fdb4d180118b5831a0440814536"
+  },
+  "crates/lucy-systemone/src/browser_policy.rs": {
+    "mtime": 1790247611.2439163,
+    "seen": 1790403416.605312,
+    "ast_hash": "76d45aaa05026be00df95751166282de",
+    "semantic_hash": "76d45aaa05026be00df95751166282de"
+  },
+  "crates/lucy-systemone/src/client.rs": {
+    "mtime": 1790245832.363561,
+    "seen": 1790403416.605313,
+    "ast_hash": "c2ee990a24caa7a865d97e09faff8b54",
+    "semantic_hash": "c2ee990a24caa7a865d97e09faff8b54"
+  },
+  "crates/lucy-systemone/src/hyprfast_browser.rs": {
+    "mtime": 1790247611.2739193,
+    "seen": 1790403416.6053138,
+    "ast_hash": "23b8a7ae64584ce15ab3967465b8de74",
+    "semantic_hash": "23b8a7ae64584ce15ab3967465b8de74"
+  },
+  "crates/lucy-systemone/src/lib.rs": {
+    "mtime": 1790243786.25975,
+    "seen": 1790403416.6053147,
+    "ast_hash": "184661d316fba1876953055cbb9e1653",
+    "semantic_hash": "184661d316fba1876953055cbb9e1653"
+  },
+  "crates/lucy-systemone/src/metrics.rs": {
+    "mtime": 1790243781.2637906,
+    "seen": 1790403416.6053157,
+    "ast_hash": "395cdd251829f8df18008033ac6583f6",
+    "semantic_hash": "395cdd251829f8df18008033ac6583f6"
+  },
+  "crates/lucy-systemone/src/snapshot.js": {
+    "mtime": 1790245666.7576873,
+    "seen": 1790403416.6053166,
+    "ast_hash": "e6a724576d8bf7f221de925aae551d5b",
+    "semantic_hash": "e6a724576d8bf7f221de925aae551d5b"
+  },
+  "crates/lucy-systemone/src/types.rs": {
+    "mtime": 1790182405.6426313,
+    "seen": 1790403416.6053174,
+    "ast_hash": "f9e05315de78b16fc3f4a68b930d772a",
+    "semantic_hash": "f9e05315de78b16fc3f4a68b930d772a"
+  },
+  "crates/lucy-systemone/tests/bench_tasks.rs": {
+    "mtime": 1790247378.9213784,
+    "seen": 1790403416.6053183,
+    "ast_hash": "831c7a4e642b10c1a57a525a40808bc0",
+    "semantic_hash": "831c7a4e642b10c1a57a525a40808bc0"
+  },
+  "crates/lucy-systemone/tests/guard_probes.rs": {
+    "mtime": 1790245228.4485373,
+    "seen": 1790403416.6053195,
+    "ast_hash": "dee1ebf6ed34f0a157a3224ce44f24f8",
+    "semantic_hash": "dee1ebf6ed34f0a157a3224ce44f24f8"
+  },
+  "crates/lucy-tools/Cargo.toml": {
+    "mtime": 1789218194.221271,
+    "seen": 1790403416.6053205,
+    "ast_hash": "b3aaea19cb5cbf0126e9620903477a79",
+    "semantic_hash": "b3aaea19cb5cbf0126e9620903477a79"
+  },
+  "crates/lucy-tools/src/lib.rs": {
+    "mtime": 1790182405.6636295,
+    "seen": 1790403416.6053212,
+    "ast_hash": "9da0d0bacbc938a30ecffd01a14ca4ad",
+    "semantic_hash": "9da0d0bacbc938a30ecffd01a14ca4ad"
+  },
+  "crates/lucy-tui/Cargo.toml": {
+    "mtime": 1789375440.311941,
+    "seen": 1790403416.605322,
+    "ast_hash": "60f470f45b41c00430f56ab45a0ef7b9",
+    "semantic_hash": "60f470f45b41c00430f56ab45a0ef7b9"
+  },
+  "crates/lucy-tui/src/commands.rs": {
+    "mtime": 1790245292.578653,
+    "seen": 1790403416.6053228,
+    "ast_hash": "eb4cb526b099b78c9ab4e55c5f9ca8f1",
+    "semantic_hash": "eb4cb526b099b78c9ab4e55c5f9ca8f1"
+  },
+  "crates/lucy-tui/src/lib.rs": {
+    "mtime": 1790182405.8046184,
+    "seen": 1790403416.6053245,
+    "ast_hash": "57d71449cadefe327ac6168aaf65029f",
+    "semantic_hash": "57d71449cadefe327ac6168aaf65029f"
+  },
+  "crates/lucy-tui/src/model.rs": {
+    "mtime": 1790182405.810618,
+    "seen": 1790403416.6053252,
+    "ast_hash": "8ab22bd4564898a07b005e1addf75c8d",
+    "semantic_hash": "8ab22bd4564898a07b005e1addf75c8d"
+  },
+  "crates/lucy-tui/src/settings.rs": {
+    "mtime": 1790182405.8226168,
+    "seen": 1790403416.6053262,
+    "ast_hash": "0559773546b3afe2605a0e550ee27615",
+    "semantic_hash": "0559773546b3afe2605a0e550ee27615"
+  },
+  "crates/lucy-tui/src/util.rs": {
+    "mtime": 1789375970.8084586,
+    "seen": 1790403416.605327,
+    "ast_hash": "4a2f806832c4140e2d4b461ecdf04318",
+    "semantic_hash": "4a2f806832c4140e2d4b461ecdf04318"
+  },
+  "crates/lucy-tui/src/views.rs": {
+    "mtime": 1790182405.8536143,
+    "seen": 1790403416.6053278,
+    "ast_hash": "c6b05b76c6613f5353cd8ab40d514163",
+    "semantic_hash": "c6b05b76c6613f5353cd8ab40d514163"
+  },
+  "crates/lucy-tui/src/voice.rs": {
+    "mtime": 1789375970.8124585,
+    "seen": 1790403416.6053286,
+    "ast_hash": "0cff06a4bd37ddb947cf0cf5b2e340a7",
+    "semantic_hash": "0cff06a4bd37ddb947cf0cf5b2e340a7"
+  },
+  ".github/workflows/ci.yml": {
+    "mtime": 1789363222.733351,
+    "seen": 1790403416.6053298,
+    "ast_hash": "bfe5f019381d97d0d130e013f397cbe7",
+    "semantic_hash": "bfe5f019381d97d0d130e013f397cbe7"
+  },
+  ".github/workflows/delete-merged-branches.yml": {
+    "mtime": 1789470143.6605494,
+    "seen": 1790403416.6053307,
+    "ast_hash": "250d51cd56900d5e90c73846e14c617f",
+    "semantic_hash": "250d51cd56900d5e90c73846e14c617f"
+  },
+  "README.md": {
+    "mtime": 1789841772.296992,
+    "seen": 1790403416.6053314,
+    "ast_hash": "0ccfb29822e24f8eeda70d965cc16132",
+    "semantic_hash": "0ccfb29822e24f8eeda70d965cc16132"
+  },
+  "THIRD_PARTY.md": {
+    "mtime": 1789470143.6605494,
+    "seen": 1790403416.6053321,
+    "ast_hash": "8de6385e5be2bb9c34e62929aa08d82c",
+    "semantic_hash": "8de6385e5be2bb9c34e62929aa08d82c"
+  },
+  "crates/lucy-systemone/tests/fixtures/feed.html": {
+    "mtime": 1790244247.3174257,
+    "seen": 1790403416.6053333,
+    "ast_hash": "a0e66f4f0be9f664de9d80b99968a898",
+    "semantic_hash": "a0e66f4f0be9f664de9d80b99968a898"
+  },
+  "crates/lucy-systemone/tests/fixtures/form.html": {
+    "mtime": 1790243973.6218204,
+    "seen": 1790403416.605334,
+    "ast_hash": "6fb4b2493458621ee4b4b8e466bb33ae",
+    "semantic_hash": "6fb4b2493458621ee4b4b8e466bb33ae"
+  },
+  "crates/lucy-systemone/tests/fixtures/guards.html": {
+    "mtime": 1790244905.794226,
+    "seen": 1790403416.6053348,
+    "ast_hash": "0be65b2e784c98bab573aa962a946b62",
+    "semantic_hash": "0be65b2e784c98bab573aa962a946b62"
+  },
+  "crates/lucy-systemone/tests/fixtures/search.html": {
+    "mtime": 1790244590.5094306,
+    "seen": 1790403416.6053355,
+    "ast_hash": "8d2fdcfed3e8d0ddc5d68b7bfc757fad",
+    "semantic_hash": "8d2fdcfed3e8d0ddc5d68b7bfc757fad"
+  },
+  "docs/lucy-harness-architecture.md": {
+    "mtime": 1789892694.7869768,
+    "seen": 1790403416.6053367,
+    "ast_hash": "4773109004e734f2b92678eb83d844eb",
+    "semantic_hash": "4773109004e734f2b92678eb83d844eb"
+  },
+  "docs/lucy-performance.md": {
+    "mtime": 1790247701.548555,
+    "seen": 1790403416.6053376,
+    "ast_hash": "1b374f84c063194f4fd5e6f7d97fd46b",
+    "semantic_hash": "1b374f84c063194f4fd5e6f7d97fd46b"
+  },
+  "prompts/router.md": {
+    "mtime": 1789897218.4648454,
+    "seen": 1790403416.6053386,
+    "ast_hash": "0bf1af7d1d3359b0557bb96aaa3f08de",
+    "semantic_hash": "0bf1af7d1d3359b0557bb96aaa3f08de"
+  },
+  "prompts/subtasks.md": {
+    "mtime": 1790187102.9394662,
+    "seen": 1790403416.6053393,
+    "ast_hash": "e7fe3e50723eebc65b2e2fc2cf00b234",
+    "semantic_hash": "e7fe3e50723eebc65b2e2fc2cf00b234"
+  },
+  "skills/lucy/SKILL.md": {
+    "mtime": 1789900829.0936663,
+    "seen": 1790403416.6053402,
+    "ast_hash": "f78a3f66eaef248a2a5f4116cbaff892",
+    "semantic_hash": "f78a3f66eaef248a2a5f4116cbaff892"
+  }
+}

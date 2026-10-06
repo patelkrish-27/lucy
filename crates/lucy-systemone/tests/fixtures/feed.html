@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Result Feed</title>
+<style>
+  /* Dense grid so >250 buttons are in-viewport at once (1280x800).
+     Each button ~60x22px, 20 per row -> 300 fits in ~330px height. */
+  #feed { display: flex; flex-wrap: wrap; gap: 4px; list-style: none; padding: 0; }
+  #feed li { margin: 0; }
+  #feed button { width: 60px; height: 22px; font-size: 10px; padding: 0; }
+</style>
+</head>
+<body>
+<h1>Results</h1>
+<ol id="feed"></ol>
+<div id="outcome" aria-live="polite"></div>
+<script>
+// 300 items: grid density puts >250 in the 1280x800 viewport, so
+// snapshot's 250-action splice + omitted_actions triggers. Scroll gap
+// probe: a second page with 300 tall items proves below-fold policy bug.
+const feed = document.getElementById('feed');
+const out = document.getElementById('outcome');
+for (let i = 1; i <= 300; i++) {
+  const li = document.createElement('li');
+  const b = document.createElement('button');
+  b.textContent = 'R' + i;
+  b.title = 'Result item ' + i;
+  b.addEventListener('click', () => { out.textContent = 'Opened: Result item ' + i; });
+  li.appendChild(b);
+  feed.appendChild(li);
+}
+</script>
+</body>
+</html>

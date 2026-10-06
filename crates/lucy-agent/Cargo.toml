@@ -4,16 +4,17 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Canned-response [`testing::StubProvider`] for the agentic loop's LLM budget
+# tests. Off in normal builds; `lucy-runtime` turns it on as a dev-dependency.
+testing = []
+
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-futures.workspace = true
 tokio.workspace = true
-tracing.workspace = true
 lucy-core = { path = "../lucy-core" }
-lucy-tools = { path = "../lucy-tools" }
 lucy-config = { path = "../lucy-config" }
-uuid.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "lucy-knowledge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+chrono = "0.4"
+serde.workspace = true
+serde_json.workspace = true
+sqlx = { version = "0.8", default-features = false, features = [
+  "runtime-tokio",
+  "sqlite",
+  "chrono",
+] }
+tokio.workspace = true
+tracing.workspace = true
+lucy-core = { path = "../lucy-core" }

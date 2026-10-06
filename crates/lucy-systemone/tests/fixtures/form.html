@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Contact Form</title></head>
+<body>
+<h1>Contact us</h1>
+<form id="contact">
+  <label>Full name <input id="name" type="text" aria-label="Full name"></label>
+  <label>Email address <input id="email" type="email" aria-label="Email address"></label>
+  <label>Country
+    <select id="country" aria-label="Country">
+      <option value="">Choose…</option>
+      <option value="portugal">Portugal</option>
+      <option value="germany">Germany</option>
+    </select>
+  </label>
+  <label><input id="news" type="checkbox" aria-label="Subscribe to newsletter"> Subscribe to newsletter</label>
+  <button id="submit" type="submit">Submit</button>
+</form>
+<div id="outcome" aria-live="polite"></div>
+<script>
+document.getElementById('contact').addEventListener('submit', e => {
+  e.preventDefault();
+  const v = id => document.getElementById(id).value;
+  const sub = document.getElementById('news').checked ? 'yes' : 'no';
+  document.getElementById('outcome').textContent =
+    'Submitted: ' + v('name') + '|' + v('email') + '|' + v('country') + '|' + sub;
+});
+</script>
+</body>
+</html>

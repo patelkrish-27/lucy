@@ -1,0 +1,12 @@
+[build]
+rustflags = []
+
+[alias]
+b = "build --release"
+r = "run --release"
+
+# Default dev profile to release optimizations so standard `cargo build` builds with release-level speed
+[profile.dev]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
