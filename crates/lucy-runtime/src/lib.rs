@@ -278,6 +278,19 @@ impl LucyRuntime {
         let adk = Arc::new(adk_opened);
         let knowledge = Arc::new(knowledge_opened);
         let memory_hub = Arc::new(memory_hub_opened);
+        // Register discovered skills as reusable Memory Hub assets. Skills remain
+        // file-backed and executable through the existing skill subsystem; the hub
+        // only makes them discoverable alongside Wiki/CodeGraph/Chat Memory.
+        for skill in &skills {
+            let _ = memory_hub.add_asset(
+                lucy_knowledge::AssetKind::Skill,
+                &skill.name,
+                &skill.description,
+                "skills",
+                "local",
+                "private",
+            ).await;
+        }
         Ok(Self {
             provider,
             system_one,
@@ -372,6 +385,9 @@ impl LucyRuntime {
         registry.register(KbSearchTool::new(self.knowledge.clone()));
         registry.register(KbGetTool::new(self.knowledge.clone()));
         registry.register(lucy_knowledge::tools::MemorySearchTool::new(self.memory_hub.clone()));
+        registry.register(lucy_knowledge::tools::MemoryStatusTool::new(self.memory_hub.clone()));
+        registry.register(lucy_knowledge::tools::MemoryAssetsTool::new(self.memory_hub.clone()));
+        registry.register(lucy_knowledge::tools::MemorySlimTool::new(self.memory_hub.clone()));
     }
 
     /// The model the capture pass runs on.
