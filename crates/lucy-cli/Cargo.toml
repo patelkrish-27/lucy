@@ -17,6 +17,7 @@ toml.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 lucy-agent = { path = "../lucy-agent" }
+lucy-acp = { path = "../lucy-acp" }
 lucy-adk = { path = "../lucy-adk" }
 lucy-core = { path = "../lucy-core" }
 lucy-hyprfast = { path = "../lucy-hyprfast" }
