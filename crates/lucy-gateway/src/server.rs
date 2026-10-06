@@ -70,7 +70,7 @@ impl GatewayState {
             bind,
             port: std::sync::atomic::AtomicU16::new(port),
             config,
-            running_task: Mutex::new(None),
+            running_task: std::sync::Mutex::new(None),
         }
     }
 
