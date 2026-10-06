@@ -479,6 +479,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wiki_reingestion_replaces_stale_sections() {
+        let h = hub().await;
+        let file = std::env::temp_dir().join(format!("lucy-wiki-{}.md", uuid::Uuid::new_v4()));
+        tokio::fs::write(&file, "# Old\nold content\n").await.unwrap();
+        assert_eq!(h.ingest_wiki(&file).await.unwrap(), 1);
+        tokio::fs::write(&file, "# New\nnew content\n").await.unwrap();
+        assert_eq!(h.ingest_wiki(&file).await.unwrap(), 1);
+        assert!(h.search_layers("old content", Some(MemoryLayer::Scenario), 8).await.is_empty());
+        assert_eq!(h.search_layers("new content", Some(MemoryLayer::Scenario), 8).await.len(), 1);
+        let _ = tokio::fs::remove_file(file).await;
+    }
+
+    #[tokio::test]
+    async fn codegraph_reindex_removes_deleted_symbols() {
+        let h = hub().await;
+        let file = std::env::temp_dir().join(format!("lucy-codegraph-{}.rs", uuid::Uuid::new_v4()));
+        tokio::fs::write(&file, "fn old_symbol() {}\n").await.unwrap();
+        h.index_rust_file(&file).await.unwrap();
+        assert_eq!(h.codegraph_query("old_symbol", 8).await.len(), 1);
+
+        tokio::fs::write(&file, "fn new_symbol() {}\n").await.unwrap();
+        h.index_rust_file(&file).await.unwrap();
+        assert!(h.codegraph_query("old_symbol", 8).await.is_empty());
+        assert_eq!(h.codegraph_query("new_symbol", 8).await.len(), 1);
+        let _ = tokio::fs::remove_file(file).await;
+    }
+
+    #[tokio::test]
     async fn slim_only_removes_exact_atom_duplicates() {
         let h = hub().await;
         h.remember(MemoryLayer::Atom, "x", "same fact", "a", 0.5, 0.2).await;
