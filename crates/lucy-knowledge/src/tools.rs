@@ -370,6 +370,39 @@ impl Tool for MemoryRecallTool {
     }
 }
 
+pub struct MemoryBindTool { hub: Arc<MemoryHub> }
+impl MemoryBindTool { pub fn new(hub: Arc<MemoryHub>) -> Self { Self { hub } } }
+#[async_trait]
+impl Tool for MemoryBindTool {
+    fn name(&self) -> &str { "memory_bind" }
+    fn description(&self) -> &str { "Equip a reusable memory asset to a named Lucy agent. Requires approval." }
+    fn parameters_schema(&self) -> Value {
+        json!({"type":"object","properties":{
+            "kind":{"type":"string","enum":["chat_memory","skill","wiki","code_graph"]},
+            "name":{"type":"string"},
+            "agent_id":{"type":"string"}
+        },"required":["kind","name","agent_id"]})
+    }
+    fn requires_approval(&self) -> bool { true }
+    async fn execute(&self, input: Value, ctx: ToolContext) -> anyhow::Result<Value> {
+        if ctx.interrupt.is_set() { return Err(lucy_core::LucyError::Cancelled.into()); }
+        let kind = match input.get("kind").and_then(Value::as_str) {
+            Some("chat_memory") => crate::AssetKind::ChatMemory,
+            Some("skill") => crate::AssetKind::Skill,
+            Some("wiki") => crate::AssetKind::Wiki,
+            Some("code_graph") => crate::AssetKind::CodeGraph,
+            Some(other) => return Err(anyhow::anyhow!("unknown asset kind: {other}")),
+            None => return Err(anyhow::anyhow!("kind is required")),
+        };
+        let name = input.get("name").and_then(Value::as_str).map(str::trim)
+            .filter(|x| !x.is_empty()).ok_or_else(|| anyhow::anyhow!("name is required"))?;
+        let agent_id = input.get("agent_id").and_then(Value::as_str).map(str::trim)
+            .filter(|x| !x.is_empty()).ok_or_else(|| anyhow::anyhow!("agent_id is required"))?;
+        let bound = self.hub.bind_asset(kind, name, agent_id).await?;
+        Ok(json!({"bound":bound,"kind":input["kind"],"name":name,"agent_id":agent_id}))
+    }
+}
+
 pub struct CodeGraphTool { hub: Arc<MemoryHub> }
 impl CodeGraphTool { pub fn new(hub: Arc<MemoryHub>) -> Self { Self { hub } } }
 #[async_trait]
