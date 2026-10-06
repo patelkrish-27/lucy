@@ -39,7 +39,7 @@ pub mod hub;
 
 pub use provenance::{Origin, SourceKind};
 pub use store::{Candidate, Chunk, KnowledgeStats, KnowledgeStore, TopicLine};
-pub use tools::{KbGetTool, KbSearchTool, MemoryAssetsTool, MemoryRecallTool, MemorySearchTool, MemorySlimTool, MemoryStatusTool, CodeGraphTool};
+pub use tools::{KbGetTool, KbSearchTool, MemoryAssetsTool, MemoryBindTool, MemoryRecallTool, MemorySearchTool, MemorySlimTool, MemoryStatusTool, CodeGraphTool};
 pub use hub::{AssetKind, MemoryAsset, MemoryHub, MemoryItem, MemoryLayer};
 
 use std::path::{Path, PathBuf};
