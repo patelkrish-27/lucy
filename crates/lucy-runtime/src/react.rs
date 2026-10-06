@@ -63,7 +63,7 @@ use tracing::debug;
 /// A decision naming more than a handful of calls is not a step, it is a script
 /// — and a script cannot react to the observations between its lines. This is
 /// the number that keeps the loop's shape a loop.
-pub const DEFAULT_TOOLS_PER_DECISION: usize = 4;
+pub const DEFAULT_TOOLS_PER_DECISION: usize = 1;
 
 /// Default lines kept from one tool result before it is cut for the transcript.
 ///
