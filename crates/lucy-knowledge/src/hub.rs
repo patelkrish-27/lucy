@@ -95,9 +95,16 @@ impl MemoryHub {
             .expect("valid sqlite path").create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal).busy_timeout(Duration::from_secs(5));
         let pool = SqlitePoolOptions::new().max_connections(4).connect_with(options).await
-            .unwrap_or_else(|_| SqlitePoolOptions::new().max_connections(1)
-                .connect_lazy("sqlite::memory:").expect("sqlite"));
-        let _ = sqlx::raw_sql(SCHEMA).execute(&pool).await;
+            .unwrap_or_else(|e| panic!(
+                "Lucy MemoryHub could not open persistent database {}: {e}.                  Refusing an in-memory fallback because it would silently lose long-term memory.",
+                db.display()
+            ));
+        sqlx::raw_sql(SCHEMA).execute(&pool).await.unwrap_or_else(|e| {
+            panic!(
+                "Lucy MemoryHub schema initialization failed for {}: {e}",
+                db.display()
+            )
+        });
         Self { pool, root }
     }
 
