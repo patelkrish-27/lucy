@@ -49,6 +49,31 @@ pub struct StdioMcpClient {
     session: Mutex<Option<Session>>,
     next_id: AtomicU64,
 }
+fn secret_env_key(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.contains("API_KEY")
+        || upper.ends_with("_TOKEN")
+        || upper.contains("SECRET")
+        || upper.contains("PASSWORD")
+        || upper.contains("PRIVATE_KEY")
+        || matches!(upper.as_str(), "AWS_ACCESS_KEY_ID" | "AWS_SESSION_TOKEN" | "AWS_SECRET_ACCESS_KEY")
+}
+
+fn apply_mcp_environment(command: &mut tokio::process::Command, explicit: &[(String, String)]) {
+    let allow_inherited = std::env::var("LUCY_ALLOW_INHERITED_SECRETS").ok().as_deref() == Some("1");
+    if !allow_inherited {
+        let safe: Vec<(String, String)> = std::env::vars()
+            .filter(|(key, _)| !secret_env_key(key))
+            .collect();
+        command.env_clear().envs(safe);
+    }
+    // Explicit MCP configuration is trusted configuration and wins over the
+    // inherited environment policy.
+    for (key, value) in explicit {
+        command.env(key, value);
+    }
+}
+
 impl StdioMcpClient {
     pub fn new(config: McpServerConfig) -> Arc<Self> {
         Arc::new(Self {
@@ -67,6 +92,7 @@ impl StdioMcpClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        apply_mcp_environment(&mut cmd, &self.config.env);
         // Never leave orphaned MCP children (e.g. `node`) behind when the
         // client is dropped after a one-shot list_tools() at startup.
         cmd.kill_on_drop(true);
