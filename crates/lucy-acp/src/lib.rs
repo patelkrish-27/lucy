@@ -174,10 +174,8 @@ impl AcpRunner {
                         // current prompt turn. The request handle is dropped
                         // on this branch as well, which sends protocol-level
                         // $/cancel_request as a second cooperative signal.
-                        connection
-                            .send_notification(CancelNotification::new(session.clone()))
-                            .map_err(Error::into_internal_error)?;
-                        anyhow::bail!("ACP prompt cancelled");
+                        connection.send_notification(CancelNotification::new(session.clone()))?;
+                        return Err(Error::internal_error().data(serde_json::json!({"reason":"ACP prompt cancelled"})));
                     }
                 };
                 Ok((init, session, prompt_response))
