@@ -752,7 +752,9 @@ impl ReactRun<'_, '_> {
                     self.stop = Some(ReactStop::Interrupted);
                     return Err(cancelled());
                 }
-                self.stop = Some(ReactStop::BudgetExhausted);
+                // A provider/network/parse failure is not budget exhaustion.
+                // Keep the stop unset so callers can classify the actual error
+                // instead of reporting a misleading exhausted run.
                 return Err(e.context("the deciding model was unavailable"));
             }
         };
