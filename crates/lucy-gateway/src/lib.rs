@@ -75,20 +75,14 @@ pub async fn serve(config: LucyConfig) -> Result<()> {
 
 /// Run the gateway, optionally minting a pairing token first and printing its
 /// QR. `pair` is what `lucy serve --pair` uses.
-pub async fn serve_with(mut config: LucyConfig, pair: Option<PairingRequest>) -> Result<()> {
-    // Pairing is intentionally turnkey: when the user asks for a QR and the
-    // configured bind is loopback, expose the gateway on the LAN so the phone
-    // can actually reach the address encoded in that QR. Authentication still
-    // gates every WebSocket/REST operation, and the pairing token is one-shot.
-    if pair.is_some() && matches!(config.gateway.bind.as_str(), "127.0.0.1" | "localhost" | "::1") {
-        config.gateway.bind = "0.0.0.0".into();
-    }
+pub async fn serve_with(config: LucyConfig, pair: Option<PairingRequest>) -> Result<()> {
     if !config.gateway.enabled {
         anyhow::bail!(
             "the mobile gateway is off — run `lucy serve --enable` (or set \
              [gateway] enabled = true, or LUCY_GATEWAY_ENABLED=1) to turn it on"
         );
     }
+    validate_bind_security(&config.gateway.bind)?;
     let gateway = state(config)?;
 
     // Mint before binding so a printed QR always belongs to a server that is
@@ -158,6 +152,17 @@ pub struct PairingRequest {
     /// Device name to show in the QR. Currently also used as the server label;
     /// the phone sends its own device name at redemption.
     pub name: Option<String>,
+}
+
+fn validate_bind_security(bind: &str) -> Result<()> {
+    let bind = bind.trim();
+    let loopback = matches!(bind, "localhost" | "127.0.0.1" | "::1");
+    if !loopback && std::env::var("LUCY_GATEWAY_ALLOW_INSECURE_BIND").ok().as_deref() != Some("1") {
+        anyhow::bail!(
+            "refusing insecure non-loopback gateway bind '{bind}':              HTTP/WebSocket bearer tokens are not encrypted; use loopback/Tailscale              or explicitly set LUCY_GATEWAY_ALLOW_INSECURE_BIND=1 on a trusted network"
+        );
+    }
+    Ok(())
 }
 
 /// Mint a pairing token and print its QR *without* starting the server. Used by
