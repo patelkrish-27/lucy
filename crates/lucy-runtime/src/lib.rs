@@ -390,6 +390,7 @@ impl LucyRuntime {
         registry.register(lucy_knowledge::tools::MemoryAssetsTool::new(self.memory_hub.clone()));
         registry.register(lucy_knowledge::tools::MemorySlimTool::new(self.memory_hub.clone()));
         registry.register(lucy_knowledge::tools::CodeGraphTool::new(self.memory_hub.clone()));
+        registry.register(lucy_knowledge::tools::MemoryBindTool::new(self.memory_hub.clone()));
     }
 
     /// The model the capture pass runs on.
