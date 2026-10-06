@@ -75,7 +75,14 @@ pub async fn serve(config: LucyConfig) -> Result<()> {
 
 /// Run the gateway, optionally minting a pairing token first and printing its
 /// QR. `pair` is what `lucy serve --pair` uses.
-pub async fn serve_with(config: LucyConfig, pair: Option<PairingRequest>) -> Result<()> {
+pub async fn serve_with(mut config: LucyConfig, pair: Option<PairingRequest>) -> Result<()> {
+    // Pairing is intentionally turnkey: when the user asks for a QR and the
+    // configured bind is loopback, expose the gateway on the LAN so the phone
+    // can actually reach the address encoded in that QR. Authentication still
+    // gates every WebSocket/REST operation, and the pairing token is one-shot.
+    if pair.is_some() && matches!(config.gateway.bind.as_str(), "127.0.0.1" | "localhost" | "::1") {
+        config.gateway.bind = "0.0.0.0".into();
+    }
     if !config.gateway.enabled {
         anyhow::bail!(
             "the mobile gateway is off — run `lucy serve --enable` (or set \
