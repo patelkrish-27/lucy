@@ -1313,6 +1313,9 @@ pub fn tool_chat_payload(
     if let Some(functions) = openai_functions(tools) {
         payload["tools"] = Value::Array(functions);
         payload["tool_choice"] = json!("auto");
+        // Lucy's ReAct loop observes each call before choosing the next one.
+        // Prevent provider-side parallel batches from violating that invariant.
+        payload["parallel_tool_calls"] = json!(false);
     }
     payload
 }
@@ -1660,6 +1663,7 @@ mod tests {
         // Lucy's `input_schema` is the API's `parameters`, unchanged.
         assert_eq!(f["parameters"], tool_catalog()["input_schema"]);
         assert_eq!(p["tool_choice"], "auto");
+        assert_eq!(p["parallel_tool_calls"], false);
         assert!(
             p.get("response_format").is_none(),
             "forcing JSON text would compete with tool_calls: {p}"
