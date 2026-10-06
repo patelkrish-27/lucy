@@ -313,7 +313,17 @@ async fn submit_task(
         )
             .into_response();
     }
-    match run_task_once(&state, &prompt).await {
+    let task_id = format!("rest-{}", Uuid::new_v4());
+    if !state.begin_task(&task_id).await {
+        return (
+            StatusCode::CONFLICT,
+            Json(json!({"error": "another task is already running"})),
+        )
+            .into_response();
+    }
+    let result = run_task_once(&state, &prompt).await;
+    state.end_task().await;
+    match result {
         Ok((summary, complete)) => {
             Json(json!({"summary": summary, "complete": complete})).into_response()
         }
