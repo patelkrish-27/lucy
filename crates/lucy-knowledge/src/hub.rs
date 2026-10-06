@@ -322,6 +322,45 @@ impl MemoryHub {
         }
         self.add_asset(AssetKind::CodeGraph, &file.display().to_string(),
             "Rust symbol index", &file.display().to_string(), "local", "private").await?;
+        let asset_id: i64 = sqlx::query_scalar("SELECT id FROM memory_assets WHERE kind='code_graph' AND name=?")
+            .bind(file.display().to_string()).fetch_one(&self.pool).await?;
+        // Materialize symbol nodes as a real graph. Calls are conservative: only
+        // identifiers that resolve to another indexed symbol become edges.
+        let mut node_ids = std::collections::HashMap::<String,i64>::new();
+        for row in sqlx::query("SELECT id,name FROM code_nodes WHERE asset_id=?")
+            .bind(asset_id).fetch_all(&self.pool).await? {
+            node_ids.insert(row.get("name"), row.get("id"));
+        }
+        for line in text.lines() {
+            let t = line.trim();
+            let (kind, name) = if let Some(rest)=t.strip_prefix("pub fn ").or_else(||t.strip_prefix("fn ")) {
+                ("function", rest.split(['(', ' ']).next().unwrap_or(""))
+            } else if let Some(rest)=t.strip_prefix("pub struct ").or_else(||t.strip_prefix("struct ")) {
+                ("struct", rest.split(['{', ' ']).next().unwrap_or(""))
+            } else if let Some(rest)=t.strip_prefix("pub enum ").or_else(||t.strip_prefix("enum ")) {
+                ("enum", rest.split(['{', ' ']).next().unwrap_or(""))
+            } else if let Some(rest)=t.strip_prefix("pub trait ").or_else(||t.strip_prefix("trait ")) {
+                ("trait", rest.split(['{', ' ']).next().unwrap_or(""))
+            } else { continue };
+            if name.is_empty() { continue; }
+            let id: i64 = sqlx::query_scalar("INSERT INTO code_nodes(asset_id,kind,name,file,signature) VALUES(?,?,?,?,?) ON CONFLICT(asset_id,name,file) DO UPDATE SET signature=excluded.signature RETURNING id")
+                .bind(asset_id).bind(kind).bind(name).bind(file.display().to_string()).bind(t)
+                .fetch_one(&self.pool).await?;
+            node_ids.insert(name.to_owned(), id);
+        }
+        for row in sqlx::query("SELECT id,name,signature FROM code_nodes WHERE asset_id=?")
+            .bind(asset_id).fetch_all(&self.pool).await? {
+            let from: i64 = row.get("id");
+            let signature: String = row.get("signature");
+            for token in signature.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+                if let Some(&to) = node_ids.get(token) {
+                    if to != from {
+                        let _ = sqlx::query("INSERT OR IGNORE INTO code_edges(from_id,to_id,kind) VALUES(?,?,?)")
+                            .bind(from).bind(to).bind("references").execute(&self.pool).await;
+                    }
+                }
+            }
+        }
         Ok(count)
     }
 }
