@@ -134,7 +134,38 @@ impl MemoryHub {
         } else {
             format!("conversation:{session}:{role}")
         };
-        self.remember(MemoryLayer::Conversation, &title, content, "lucy:conversation", 1.0, 0.35).await
+        let inserted = self
+            .remember(
+                MemoryLayer::Conversation,
+                &title,
+                content,
+                "lucy:conversation",
+                1.0,
+                0.35,
+            )
+            .await;
+
+        // L0 is a transcript cache, not an infinite archive. Keep the newest
+        // 500 conversation messages per session while higher-value L1/L2/L3
+        // memories remain durable. This prevents long-running agents from
+        // eventually filling the memory DB just because every turn is captured.
+        if !session.is_empty() {
+            let _ = sqlx::query(
+                "DELETE FROM memory_items
+                 WHERE source='lucy:conversation'
+                   AND title LIKE ?
+                   AND id NOT IN (
+                       SELECT id FROM memory_items
+                       WHERE source='lucy:conversation' AND title LIKE ?
+                       ORDER BY id DESC LIMIT 500
+                   )",
+            )
+            .bind(format!("conversation:{session}:%"))
+            .bind(format!("conversation:{session}:%"))
+            .execute(&self.pool)
+            .await;
+        }
+        inserted
     }
 
     pub async fn search(&self, query: &str, limit: usize) -> Vec<MemoryItem> {
