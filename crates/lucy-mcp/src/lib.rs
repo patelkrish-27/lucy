@@ -336,6 +336,41 @@ mod tests {
         }
     }
     #[test]
+    fn command_args_preserve_quoted_values() {
+        assert_eq!(
+            split_command_args(r#"node "file with spaces.js" --name "Lucy Agent""#).unwrap(),
+            vec![
+                "node",
+                "file with spaces.js",
+                "--name",
+                "Lucy Agent"
+            ]
+        );
+        assert!(split_command_args(r#"node "unterminated"#).is_none());
+    }
+
+    #[test]
+    fn mcp_name_collisions_never_overwrite_tools() {
+        let mut registry = lucy_tools::ToolRegistry::new();
+        let config = McpServerConfig {
+            name: "server".into(),
+            command: "definitely-not-a-real-binary-xyz".into(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+        let n = register_server_with_defs(
+            &mut registry,
+            config,
+            vec![def("foo-bar"), def("foo_bar")],
+        );
+        assert_eq!(n, 2);
+        assert!(registry.get("mcp_server_foo_bar").is_some());
+        assert!(registry.get("mcp_server_foo_bar_2").is_some());
+        assert!(registry.get("foo-bar").is_some());
+        assert!(registry.get("foo_bar").is_some());
+    }
+
+    #[test]
     fn registers_prefetched_defs_without_spawning() {
         // Must not spawn anything: command does not exist, so any spawn
         // attempt would fail. Proxies connect lazily on first execute().
