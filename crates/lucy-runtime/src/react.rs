@@ -414,11 +414,19 @@ pub trait ReactModel: Send + Sync {
 pub struct LoopbackModel<'a> {
     provider: &'a dyn ModelProvider,
     target: ModelTarget,
+    tools: Vec<Value>,
 }
 
 impl<'a> LoopbackModel<'a> {
     pub fn new(provider: &'a dyn ModelProvider, target: ModelTarget) -> Self {
-        Self { provider, target }
+        Self { provider, target, tools: Vec::new() }
+    }
+
+    /// Enable the provider's native structured tool-calling API. Keeping the
+    /// old constructor preserves the lightweight text-only test seam.
+    pub fn with_tools(mut self, tools: Vec<Value>) -> Self {
+        self.tools = tools;
+        self
     }
 }
 
@@ -432,19 +440,34 @@ impl ReactModel for LoopbackModel<'_> {
         max_tokens: Option<u32>,
     ) -> Pin<Box<dyn Future<Output = Result<AssistantTurn>> + Send + 'a>> {
         let transcript = render_transcript(messages);
+        let tools = self.tools.clone();
         Box::pin(async move {
-            let reply = self
-                .provider
-                .complete_text_on(
-                    &self.target,
-                    purpose,
-                    system,
-                    &transcript,
-                    interrupt.clone(),
-                    max_tokens,
-                )
-                .await?;
-            Ok(turn_from_reply(&reply))
+            if tools.is_empty() {
+                let reply = self
+                    .provider
+                    .complete_text_on(
+                        &self.target,
+                        purpose,
+                        system,
+                        &transcript,
+                        interrupt.clone(),
+                        max_tokens,
+                    )
+                    .await?;
+                Ok(turn_from_reply(&reply))
+            } else {
+                self.provider
+                    .complete_with_tools_on(
+                        &self.target,
+                        purpose,
+                        system,
+                        &transcript,
+                        &tools,
+                        interrupt.clone(),
+                        max_tokens,
+                    )
+                    .await
+            }
         })
     }
 }
@@ -1207,7 +1230,7 @@ fn strip_probe(text: &str) -> String {
 /// task forever, so what belongs in it is the *shape of the contract* and
 /// nothing about any one goal: a rule that only one task benefits from belongs
 /// in that task's transcript, not in a prompt the whole product pays for.
-pub const REACT_SYSTEM: &str = r#"You are Lucy, an autonomous agent working one goal in small steps. Answer with ONLY one JSON object.
+pub const REACT_SYSTEM: &str = r#"You are Lucy, an autonomous agent working one goal in small steps. Use the provided tool-calling interface for actions; do not encode tool calls as JSON text.
 
 {"thought":"one short line","probe":null,"tool_calls":[{"name":"exact tool name","input":{}}]}
 
@@ -1303,7 +1326,8 @@ pub async fn run_react_outcome(
             rt.provider_dyn().model(),
         )
     });
-    let model = LoopbackModel::new(rt.provider_dyn(), target);
+    let model = LoopbackModel::new(rt.provider_dyn(), target)
+        .with_tools(registry.definitions());
     let deps = ReactDeps {
         model: &model,
         registry: &registry,
