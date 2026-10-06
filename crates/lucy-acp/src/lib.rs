@@ -84,9 +84,23 @@ impl AcpRunner {
         F: FnMut(&SessionNotification),
     {
         let agent = self.acp_agent()?;
-        let cwd = self.cwd.clone().unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-        });
+        let cwd = match self.cwd.clone() {
+            Some(path) if path.is_absolute() => path,
+            Some(path) => std::env::current_dir()
+                .context("could not resolve ACP working directory")?
+                .join(path),
+            None => std::env::current_dir().context("could not determine ACP working directory")?,
+        };
+        anyhow::ensure!(
+            cwd.is_absolute(),
+            "ACP session working directory must be absolute: {}",
+            cwd.display()
+        );
+        anyhow::ensure!(
+            cwd.is_dir(),
+            "ACP session working directory does not exist or is not a directory: {}",
+            cwd.display()
+        );
         let (tx, mut rx): (
             UnboundedSender<SessionNotification>,
             UnboundedReceiver<SessionNotification>,
