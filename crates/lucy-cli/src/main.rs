@@ -270,6 +270,22 @@ async fn serve_command(args: Vec<String>) -> anyhow::Result<()> {
         config.gateway.bind = bind.clone();
     }
 
+    // HTTP/WebSocket carries a bearer/device token. Never let a one-line
+    // bind override accidentally expose that credential-bearing control plane
+    // to the LAN. Remote access should use a private network such as Tailscale
+    // with an explicit bind, or TLS/reverse-proxy in front of Lucy.
+    let bind_is_loopback = config.gateway.bind.trim() == "localhost"
+        || config.gateway.bind.trim() == "127.0.0.1"
+        || config.gateway.bind.trim() == "::1";
+    if !bind_is_loopback && std::env::var("LUCY_GATEWAY_ALLOW_INSECURE_BIND")
+        .ok().as_deref() != Some("1")
+    {
+        anyhow::bail!(
+            "refusing insecure non-loopback gateway bind '{}':              set LUCY_GATEWAY_ALLOW_INSECURE_BIND=1 only when the network is trusted,              or bind Lucy to loopback/Tailscale and use a secure tunnel",
+            config.gateway.bind
+        );
+    }
+
     // The opt-in gate.
     if !config.gateway_enabled() {
         anyhow::bail!(
