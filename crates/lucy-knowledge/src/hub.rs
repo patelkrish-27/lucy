@@ -354,6 +354,15 @@ impl MemoryHub {
     pub async fn index_rust_file(&self, file: impl AsRef<Path>) -> Result<usize> {
         let file = file.as_ref();
         let text = tokio::fs::read_to_string(file).await.context("read Rust source")?;
+        let source = file.display().to_string();
+
+        // Replace the searchable projection before rebuilding it so renamed or
+        // deleted symbols cannot survive a re-index.
+        sqlx::query("DELETE FROM memory_items WHERE layer='scenario' AND source=?")
+            .bind(&source)
+            .execute(&self.pool)
+            .await
+            .context("replace CodeGraph memory projection")?;
         let mut count = 0;
         for line in text.lines() {
             let t = line.trim();
@@ -385,15 +394,6 @@ impl MemoryHub {
             .execute(&self.pool)
             .await
             .context("replace CodeGraph nodes")?;
-
-        // Also replace the searchable scenario projection generated from this
-        // source. Authored knowledge uses different source identifiers and is
-        // therefore untouched.
-        sqlx::query("DELETE FROM memory_items WHERE layer='scenario' AND source=?")
-            .bind(file.display().to_string())
-            .execute(&self.pool)
-            .await
-            .context("replace CodeGraph memory projection")?;
 
         // Materialize symbol nodes as a real graph. Calls are conservative: only
         // identifiers that resolve to another indexed symbol become edges.
