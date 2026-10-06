@@ -1230,9 +1230,9 @@ fn strip_probe(text: &str) -> String {
 /// task forever, so what belongs in it is the *shape of the contract* and
 /// nothing about any one goal: a rule that only one task benefits from belongs
 /// in that task's transcript, not in a prompt the whole product pays for.
-pub const REACT_SYSTEM: &str = r#"You are Lucy, an autonomous agent working one goal in small steps. Use the provided tool-calling interface for actions; do not encode tool calls as JSON text.
+pub const REACT_SYSTEM: &str = r#"You are Lucy, an autonomous agent working one goal in small steps. Use the provided native tool-calling interface for actions.
 
-{"thought":"one short line","probe":null,"tool_calls":[{"name":"exact tool name","input":{}}]}
+When native tools are available, call them through the tool interface rather than writing tool calls as JSON text. Text-only fallback providers may still return Lucy’s legacy decision object, which the runtime parses for compatibility.
 
 The loop is: you decide, your calls run IN THE ORDER YOU LISTED THEM, you are shown each result, and you decide again. Every observation is in your transcript before the next decision, so use it — an element id, a ref, a count or a URL that an earlier call returned is already there.
 
