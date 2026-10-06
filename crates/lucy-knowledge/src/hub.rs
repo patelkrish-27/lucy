@@ -293,31 +293,46 @@ impl MemoryHub {
         let file = file.as_ref();
         let text = tokio::fs::read_to_string(file).await.context("read wiki source")?;
         let name = file.file_stem().and_then(|x| x.to_str()).unwrap_or("wiki");
-        self.add_asset(AssetKind::Wiki, name, "Local Markdown knowledge corpus",
-            &file.display().to_string(), "local", "private").await?;
-        let mut count = 0usize;
+        let source = file.display().to_string();
+
+        // Parse everything before mutating storage. Re-ingestion replaces the
+        // previous projection for this source instead of accumulating stale
+        // sections every time the Markdown file changes.
+        let mut sections = Vec::<(String, String)>::new();
         let mut title = name.to_owned();
         let mut body = String::new();
         for line in text.lines() {
             if let Some(h) = line.strip_prefix("# ").or_else(|| line.strip_prefix("## ")) {
                 if !body.trim().is_empty() {
-                    self.remember(MemoryLayer::Scenario, &title, &body,
-                        &file.display().to_string(), 1.0, 0.8).await;
-                    count += 1;
+                    sections.push((title, body));
                 }
                 title = h.trim().to_owned();
-                body.clear();
+                body = String::new();
             } else {
                 body.push_str(line);
                 body.push('\\n');
             }
         }
         if !body.trim().is_empty() {
-            self.remember(MemoryLayer::Scenario, &title, &body,
-                &file.display().to_string(), 1.0, 0.8).await;
-            count += 1;
+            sections.push((title, body));
         }
-        Ok(count)
+
+        let mut tx = self.pool.begin().await.context("begin wiki ingestion")?;
+        sqlx::query("DELETE FROM memory_items WHERE layer='scenario' AND source=?")
+            .bind(&source).execute(&mut *tx).await.context("replace wiki memories")?;
+        let now = chrono::Utc::now().to_rfc3339();
+        for (title, body) in &sections {
+            sqlx::query("INSERT INTO memory_items(layer,title,content,source,confidence,importance,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
+                .bind("scenario").bind(title).bind(body).bind(&source)
+                .bind(1.0_f32).bind(0.8_f32).bind(&now).bind(&now)
+                .execute(&mut *tx).await.context("insert wiki memory")?;
+        }
+        tx.commit().await.context("commit wiki ingestion")?;
+
+        self.add_asset(
+            AssetKind::Wiki, name, "Local Markdown knowledge corpus", &source, "local", "private"
+        ).await?;
+        Ok(sections.len())
     }
 
     /// Query indexed CodeGraph symbols and direct relationships.
@@ -362,6 +377,24 @@ impl MemoryHub {
             "Rust symbol index", &file.display().to_string(), "local", "private").await?;
         let asset_id: i64 = sqlx::query_scalar("SELECT id FROM memory_assets WHERE kind='code_graph' AND name=?")
             .bind(file.display().to_string()).fetch_one(&self.pool).await?;
+        // Re-indexing is a replacement operation. Remove nodes and edges from
+        // the previous version first; FK cascades clear stale relationships.
+        // This prevents deleted/renamed symbols from surviving forever.
+        sqlx::query("DELETE FROM code_nodes WHERE asset_id=?")
+            .bind(asset_id)
+            .execute(&self.pool)
+            .await
+            .context("replace CodeGraph nodes")?;
+
+        // Also replace the searchable scenario projection generated from this
+        // source. Authored knowledge uses different source identifiers and is
+        // therefore untouched.
+        sqlx::query("DELETE FROM memory_items WHERE layer='scenario' AND source=?")
+            .bind(file.display().to_string())
+            .execute(&self.pool)
+            .await
+            .context("replace CodeGraph memory projection")?;
+
         // Materialize symbol nodes as a real graph. Calls are conservative: only
         // identifiers that resolve to another indexed symbol become edges.
         let mut node_ids = std::collections::HashMap::<String,i64>::new();
