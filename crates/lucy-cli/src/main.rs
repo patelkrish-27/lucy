@@ -26,6 +26,7 @@ async fn main() -> anyhow::Result<()> {
         Some("ask") | Some("chat") => ask_command(args.collect()).await?,
         Some("smoke") => smoke_command(args.collect()).await?,
         Some("mascot") => mascot_command(args.collect())?,
+        Some("acp") => acp_command(args.collect()).await?,
         Some("voice") => {
             let stt = load_stt().ok().map(Arc::new);
             lucy_tui::run_voice(stt).await?;
@@ -174,7 +175,9 @@ fn config_command(args: Vec<String>) -> anyhow::Result<()> {
 }
 fn print_help() {
     println!(
-        "Lucy\n\nUsage:\n  lucy                         Open the Lucy TUI\n  lucy voice                   Open the voice-enabled TUI\n  lucy mascot [dir] [--scale N] Export the mascot art as PNG + HTML\n  lucy ask <prompt>            Laya classifies chat vs act, then replies or runs action\n  lucy act <goal>              Laya classifies chat vs act; chat replies, act runs automation\n  lucy agent <goal>            Run the ReAct loop: the model sees what each tool returned and\n                           picks the next call, so a wrong step costs one reply not a re-plan\n  lucy decide <subcommand>     Query Laya decisions directly (mode|tools|click|type|done)\n  lucy serve [--pair] [--port N] [--bind ADDR] [--enable|--disable|--status|--stop]\n                           Run the mobile gateway (off by default; --enable turns it on,\n                           --pair prints a pairing QR, --status/--stop inspect or shut it down)\n  lucy pair [--reissue]        Mint a pairing token for the Lucy app (gateway must be on)\n  lucy smoke                   Run end-to-end pipeline smoke test\n  lucy transcribe <audio-file> Transcribe an audio file
+        "Lucy\n\nUsage:\n  lucy                         Open the Lucy TUI\n  lucy voice                   Open the voice-enabled TUI\n  lucy mascot [dir] [--scale N] Export the mascot art as PNG + HTML
+  lucy acp connect [command...]  Check an ACP agent (defaults to opencode acp)
+  lucy acp run [command...] -- <prompt>  Delegate a prompt to an ACP agent\n  lucy ask <prompt>            Laya classifies chat vs act, then replies or runs action\n  lucy act <goal>              Laya classifies chat vs act; chat replies, act runs automation\n  lucy agent <goal>            Run the ReAct loop: the model sees what each tool returned and\n                           picks the next call, so a wrong step costs one reply not a re-plan\n  lucy decide <subcommand>     Query Laya decisions directly (mode|tools|click|type|done)\n  lucy serve [--pair] [--port N] [--bind ADDR] [--enable|--disable|--status|--stop]\n                           Run the mobile gateway (off by default; --enable turns it on,\n                           --pair prints a pairing QR, --status/--stop inspect or shut it down)\n  lucy pair [--reissue]        Mint a pairing token for the Lucy app (gateway must be on)\n  lucy smoke                   Run end-to-end pipeline smoke test\n  lucy transcribe <audio-file> Transcribe an audio file
   lucy models log [-n N] [--kind llm|classification|voice] [--failures]
                            Show recent model calls (voice/STT, classification, LLM)\n  lucy session list            List sessions\n  lucy session new [title]     Create a new session\n  lucy session show [id]       Show session details\n  lucy session rename <id> <title>  Rename a session\n  lucy session delete <id>     Delete a session\n  lucy session clear <id>      Clear a session's history\n  lucy session export <id> <file.json>  Export a session\n  lucy config                  Show configuration\n  lucy config show             Show configuration\n  lucy config get <key>        Read a setting\n  lucy config set <key> <value> Change a setting\n  lucy config path              Show config file path\n  lucy config init              Create config file if missing\n  lucy config reset             Reset settings to defaults\n  lucy config doctor            Check Lucy configuration\n"
     )
@@ -371,6 +374,47 @@ async fn gateway_is_up(config: &LucyConfig) -> Option<String> {
 /// The TUI paints the sprite into character cells, which is a lossy way to
 /// judge a drawing. This is the same painter with the pixels left intact, so
 /// the art can be checked at full size and iterated on.
+async fn acp_command(args: Vec<String>) -> anyhow::Result<()> {
+    let sub = args.first().map(String::as_str).unwrap_or("connect");
+    let (runner_args, prompt) = match sub {
+        "connect" => (args[1..].to_vec(), None),
+        "run" => {
+            let rest = &args[1..];
+            let Some(i) = rest.iter().position(|a| a == "--") else {
+                anyhow::bail!("usage: lucy acp run [command...] -- <prompt>");
+            };
+            let command = rest[..i].to_vec();
+            let prompt = rest[i + 1..].join(" ");
+            if prompt.trim().is_empty() {
+                anyhow::bail!("usage: lucy acp run [command...] -- <prompt>");
+            }
+            (command, Some(prompt))
+        }
+        other => anyhow::bail!("unknown acp command '{other}'; use connect or run"),
+    };
+
+    let runner = if runner_args.is_empty() {
+        lucy_acp::AcpRunner::opencode()
+    } else {
+        lucy_acp::AcpRunner::from_command_line(&runner_args.join(" "))?
+    };
+
+    if let Some(prompt) = prompt {
+        println!("🔌 ACP runner: {}", runner.command);
+        let result = runner.prompt(&prompt).await?;
+        println!("{}", result.text.trim());
+        println!("\n[ACP] {} · {}", result.agent_name, result.stop_reason);
+    } else {
+        let info = runner.initialize().await?;
+        println!("ACP connected");
+        println!("  runner   : {}", info.runner);
+        println!("  command  : {}", info.command);
+        println!("  protocol : {}", info.protocol_version);
+        println!("  agent    : {}", info.agent_name);
+    }
+    Ok(())
+}
+
 fn mascot_command(args: Vec<String>) -> anyhow::Result<()> {
     let mut scale = 4usize;
     let mut dir: Option<String> = None;
