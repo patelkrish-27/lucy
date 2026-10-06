@@ -159,6 +159,21 @@ pub async fn capture_turn(
     )
     .await;
     if !captured.is_empty() {
+        let memory = rt.memory_hub();
+        for claim in &captured {
+            let layer = match claim.kind.as_str() {
+                "project" => lucy_knowledge::MemoryLayer::Scenario,
+                _ => lucy_knowledge::MemoryLayer::Atom,
+            };
+            let _ = memory.remember(
+                layer,
+                &claim.slug,
+                &claim.text,
+                "lucy:turn-capture",
+                0.95,
+                0.8,
+            ).await;
+        }
         let slugs: Vec<String> = captured.iter().map(|c| c.slug.clone()).collect();
         store
             .log(&format!(
