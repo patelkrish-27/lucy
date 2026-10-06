@@ -322,6 +322,54 @@ impl Tool for MemorySearchTool {
     }
 }
 
+/// Unified recall across Lucy's layered memory and authored knowledge base.
+/// This is deliberately deterministic today: two lexical ranked lists are fused
+/// with reciprocal-rank fusion, leaving embeddings optional rather than required.
+pub struct MemoryRecallTool {
+    hub: Arc<MemoryHub>,
+    store: Arc<KnowledgeStore>,
+}
+impl MemoryRecallTool {
+    pub fn new(hub: Arc<MemoryHub>, store: Arc<KnowledgeStore>) -> Self { Self { hub, store } }
+}
+#[async_trait]
+impl Tool for MemoryRecallTool {
+    fn name(&self) -> &str { "memory_recall" }
+    fn description(&self) -> &str {
+        "Unified on-demand recall across layered memory and the authored knowledge base. \
+         Results are fused by reciprocal rank; nothing is written or injected globally."
+    }
+    fn parameters_schema(&self) -> Value {
+        json!({"type":"object","properties":{
+            "query":{"type":"string"},
+            "limit":{"type":"integer","minimum":1,"maximum":12}
+        },"required":["query"]})
+    }
+    fn requires_approval(&self) -> bool { false }
+    async fn execute(&self, input: Value, ctx: ToolContext) -> anyhow::Result<Value> {
+        if ctx.interrupt.is_set() { return Err(lucy_core::LucyError::Cancelled.into()); }
+        let query = input.get("query").and_then(Value::as_str).map(str::trim)
+            .filter(|q| !q.is_empty()).ok_or_else(|| anyhow::anyhow!("query is required"))?;
+        let limit = input.get("limit").and_then(Value::as_u64).unwrap_or(8).clamp(1,12) as usize;
+        let memory = self.hub.search(query, limit).await;
+        let knowledge = self.store.search(query, limit, false).await;
+        let mut fused = Vec::new();
+        for (rank, item) in memory.iter().enumerate() {
+            fused.push((60.0 / (60.0 + rank as f64), "memory", item.title.clone(),
+                item.content.clone(), item.source.clone()));
+        }
+        for (rank, item) in knowledge.iter().enumerate() {
+            fused.push((60.0 / (60.0 + rank as f64), "knowledge", item.slug.clone(),
+                item.body.clone(), item.origin.as_str().to_owned()));
+        }
+        fused.sort_by(|a,b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let matches = fused.into_iter().take(limit).map(|(score, kind, title, content, source)| {
+            json!({"score":score,"kind":kind,"title":title,"content":content,"source":source})
+        }).collect::<Vec<_>>();
+        Ok(json!({"matches":matches,"count":matches.len()}))
+    }
+}
+
 /// Lightweight maintenance/status surfaces modelled after self-hosted memory hubs.
 /// Status is safe; slim requires approval because it mutates the local memory index.
 pub struct MemoryStatusTool { hub: Arc<MemoryHub> }
