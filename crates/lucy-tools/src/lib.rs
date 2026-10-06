@@ -658,6 +658,33 @@ mod tests {
         );
     }
     #[test]
+    fn file_paths_cannot_escape_workspace() {
+        let root = std::env::temp_dir().join(format!("lucy-tools-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temp workspace");
+        let (events, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = ToolContext {
+            session_id: SessionId::default(),
+            tool_call_id: "path-test".into(),
+            working_dir: Some(root.clone()),
+            execution_mode: ExecutionMode::Agent,
+            events,
+            interrupt: InterruptSignal::new(),
+        };
+
+        assert!(ctx.resolve_path_checked(std::path::Path::new("inside.txt")).is_ok());
+        assert!(ctx.resolve_path_checked(std::path::Path::new("../outside.txt")).is_err());
+
+        #[cfg(unix)]
+        {
+            let link = root.join("escape");
+            std::os::unix::fs::symlink("/tmp", &link).expect("create symlink");
+            assert!(ctx.resolve_path_checked(std::path::Path::new("escape")).is_err());
+        }
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn shell_blocks_destructive_commands() {
         assert!(!allowed_command("rm -rf / --no-preserve-root"));
         assert!(allowed_command("ls -la"));
