@@ -113,6 +113,8 @@ pub struct LucyRuntime {
     /// [`LucyConfig::knowledge_dir`] with a rebuildable SQLite index beside it;
     /// see the `knowledge` module for how a turn reads it.
     knowledge: Arc<KnowledgeStore>,
+    /// Tencent-style layered memory/assets hub sharing the same knowledge root.
+    memory_hub: Arc<lucy_knowledge::MemoryHub>,
     tool_brief: String,
     skills: Vec<SkillInfo>,
     mcp_tools: Vec<McpToolFull>,
@@ -263,6 +265,7 @@ impl LucyRuntime {
         // cheap and cannot meaningfully fail — but it is off the startup
         // critical path anyway, since nothing waits on it to answer a turn.
         let knowledge_opened = KnowledgeStore::open(config.knowledge_dir()).await;
+        let memory_hub_opened = lucy_knowledge::MemoryHub::open(config.knowledge_dir()).await;
         let approvals_mode = config.approval_mode().to_owned();
         let approvals_allow = config.always_allow().to_vec();
         // Built from a clone so the config can still be moved into the runtime.
@@ -274,6 +277,7 @@ impl LucyRuntime {
             .await?;
         let adk = Arc::new(adk_opened);
         let knowledge = Arc::new(knowledge_opened);
+        let memory_hub = Arc::new(memory_hub_opened);
         Ok(Self {
             provider,
             system_one,
@@ -284,6 +288,7 @@ impl LucyRuntime {
             config: std::sync::RwLock::new(config),
             adk,
             knowledge,
+            memory_hub,
             tool_brief,
             skills,
             mcp_server_configs: server_configs
@@ -338,6 +343,11 @@ impl LucyRuntime {
     /// answers every query with nothing rather than failing the turn.
     pub fn knowledge_store(&self) -> Arc<KnowledgeStore> {
         self.knowledge.clone()
+    }
+
+    /// Shared layered memory and portable knowledge assets.
+    pub fn memory_hub(&self) -> Arc<lucy_knowledge::MemoryHub> {
+        self.memory_hub.clone()
     }
 
     pub fn knowledge_enabled(&self) -> bool {
